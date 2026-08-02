@@ -19,7 +19,7 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
-REQUIRED_REASON='the Stop-owned automatic watcher mechanism is broken; inspect its hook registration and startup failure before ending the turn'
+REQUIRED_REASON='watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn'
 
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------
 
@@ -1055,7 +1055,7 @@ test_hook_claude_mode_reblocks_x_mode_without_tasks() {
 }
 
 test_hook_claude_mode_allows_when_autoarm_owner_alive() {
-  local dir pid out status
+  local dir pid out status count
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-owner")
   : > "$dir/state/task1.meta"
   seed_claude_failure "$dir"
@@ -1069,8 +1069,11 @@ test_hook_claude_mode_allows_when_autoarm_owner_alive() {
   wait "$pid" 2>/dev/null || true
   expect_code 0 "$status" "--claude mode must allow when the auto-arm owner process is alive"
   [ -z "$out" ] || fail "--claude owner-claimed allow produced output: $out"
+  count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
+  [ "$count" = 3 ] || fail "live auto-arm owner reset failure progression from 3 to $count"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "live auto-arm owner cleared the failure episode"
   assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "live automatic continuation emitted the attended fail-open alarm"
-  pass "fm-turnend-guard --claude: allows the stop when the Stop auto-arm owner holds this home"
+  pass "fm-turnend-guard --claude: live auto-arm owner preserves the active failure progression"
 }
 
 test_hook_claude_mode_allows_on_fresh_rewake_epoch() {

@@ -133,7 +133,6 @@ BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
-AUTOARM_FAILURE_HANDOFF=0
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
   rm -f "$BUDGET_FILE" 2>/dev/null || true
@@ -147,7 +146,7 @@ positive_recovery_reset() {
 
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
-  budget_reset
+  [ -e "$FAILURE_NOTICE" ] || budget_reset
   exit 0
 fi
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
@@ -245,7 +244,6 @@ budget_consume_block() {
 
 autoarm_owns_recovery() {
   local pid outcome age
-  AUTOARM_FAILURE_HANDOFF=0
   fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && return 0
   pid=$(cat "$STATE/.claude-autoarm.lock/pid" 2>/dev/null || true)
   fm_pid_alive "$pid" && return 0
@@ -259,7 +257,6 @@ autoarm_owns_recovery() {
       age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
       if [ "$age" -lt "$EPOCH_FRESH" ] && [ -e "$FAILURE_NOTICE" ] \
         && failure_handoff_for_current_epoch; then
-        AUTOARM_FAILURE_HANDOFF=1
         return 0
       fi
       ;;
@@ -267,7 +264,6 @@ autoarm_owns_recovery() {
       age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
       if [ "$age" -lt "$EPOCH_FRESH" ] && [ -e "$FAILURE_NOTICE" ] \
         && failure_handoff_for_current_epoch; then
-        AUTOARM_FAILURE_HANDOFF=1
         return 0
       fi
       ;;
@@ -291,8 +287,6 @@ while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
   if autoarm_owns_recovery; then
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
       positive_recovery_reset
-    elif [ "$AUTOARM_FAILURE_HANDOFF" -eq 0 ]; then
-      budget_reset
     fi
     exit 0
   fi
@@ -302,8 +296,6 @@ done
 if autoarm_owns_recovery; then
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
     positive_recovery_reset
-  elif [ "$AUTOARM_FAILURE_HANDOFF" -eq 0 ]; then
-    budget_reset
   fi
   exit 0
 fi
@@ -319,7 +311,6 @@ if [ "$COUNT" -gt "$BLOCK_BUDGET" ]; then
       exit 0
     fi
     if autoarm_owns_recovery; then
-      budget_reset
       exit 0
     fi
     if (set -C; : > "$FAILURE_ALARM") 2>/dev/null; then

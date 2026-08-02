@@ -390,26 +390,20 @@ test_unverified_clean_close_exhausts_retries() {
   pass "auto-arm: unverified clean close exhausts retries and fails closed"
 }
 
-test_actionable_recovery_starts_new_failure_episode() {
-  local dir out1 out2 out3 status1 status2 status3
-  dir=$(make_primary_dir "$TMP_ROOT/failure-episode-reset")
+test_post_alarm_actionable_close_is_suppressed() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/post-alarm-actionable")
   : > "$dir/state/task.meta"
-  write_arm_fixture "$dir" failed
-  out1=$(run_autoarm "$dir" 2>/dev/null); status1=$?
+  : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/.claude-autoarm-failure-alarmed"
   write_arm_fixture "$dir" actionable
-  out2=$(run_autoarm "$dir" 2>/dev/null); status2=$?
-  [ ! -e "$dir/state/.claude-autoarm-failure-notified" ] || fail "actionable recovery did not clear the failure episode marker"
-  [ ! -e "$dir/state/.claude-autoarm-failure-alarmed" ] || fail "actionable recovery did not clear the attended alarm marker"
-  write_arm_fixture "$dir" failed
-  out3=$(run_autoarm "$dir" 2>/dev/null); status3=$?
-  expect_code 2 "$status1" "the first failure episode must notify"
-  expect_code 2 "$status2" "actionable recovery must rewake"
-  expect_code 2 "$status3" "a later independent failure episode must notify"
-  assert_contains "$out1" "automatic supervision mechanism is broken" "first failure episode notice missing"
-  assert_contains "$out2" "firstmate watcher wake" "actionable recovery rewake missing"
-  assert_contains "$out3" "automatic supervision mechanism is broken" "later failure episode notice was suppressed"
-  pass "auto-arm: actionable recovery resets failure-notice deduplication"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 0 "$status" "an actionable result after attended fail-open must not continue"
+  [ -z "$out" ] || fail "post-alarm actionable result produced continuation output: $out"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "post-alarm actionable result cleared the failure notice"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "post-alarm actionable result cleared the attended alarm"
+  [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "post-alarm actionable result must record failed-suppressed"
+  pass "auto-arm: post-alarm actionable outcomes cannot continue or reset failure state"
 }
 
 test_benign_cycle_end_with_live_watcher_is_silent() {
@@ -528,7 +522,7 @@ test_actionable_close_rewakes_with_reason
 test_failed_close_rewakes_with_failure_banner
 test_failed_cycles_notify_once_and_keep_retrying
 test_unverified_clean_close_exhausts_retries
-test_actionable_recovery_starts_new_failure_episode
+test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent
 test_arms_for_x_mode_poll_need_without_inflight
 test_single_flight_admits_exactly_one_owner

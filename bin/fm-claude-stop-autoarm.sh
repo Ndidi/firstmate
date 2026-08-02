@@ -208,8 +208,15 @@ if [ "$HEALTHY" -eq 1 ]; then
   exit 0
 fi
 
+# After the synchronous guard has consumed the episode's attended fail-open,
+# do not create another exit-2 continuation that could defeat it.
+if [ -e "$FAILURE_ALARM" ]; then
+  write_epoch failed-suppressed
+  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+  exit 0
+fi
+
 if [ "$ACTIONABLE" -eq 1 ]; then
-  rm -f "$FAILURE_NOTICE" "$FAILURE_ALARM" 2>/dev/null || true
   write_epoch rewake
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
@@ -218,15 +225,6 @@ if [ "$ACTIONABLE" -eq 1 ]; then
   } >&2
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 2
-fi
-
-# The arm exhausted its bounded attempts and the positive live-watcher check
-# still failed. After the synchronous guard has consumed the episode's attended
-# fail-open, do not create another exit-2 continuation that could defeat it.
-if [ -e "$FAILURE_ALARM" ]; then
-  write_epoch failed-suppressed
-  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-  exit 0
 fi
 
 # Notify only once for this continuous failure episode; every later invocation
