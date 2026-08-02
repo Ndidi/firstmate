@@ -19,6 +19,8 @@ It accepts `--none` as an explicit semantic inventory result, not as inferred ab
 It verifies every listed identity against tasks-axi before recording completion.
 For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` transfer event only after the matching backlog hold is durable.
 `bin/fm-classify-lib.sh` recognizes that transfer as closing the live status copy without claiming that the captain has answered it.
+That library also owns which key each status line opens, and its fold guarantees the gate sees exactly one record per line.
+A line whose key cannot be resolved to a single slug opens a reserved `!unresolved-key-<line>` record rather than a guessed or defaulted one, so `complete` and `verify` reject it by name instead of absorbing it into an unrelated decision.
 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
 The `--force` path remains the explicit captain-approved discard escape hatch.
@@ -43,11 +45,13 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Decision key grammar verification date: 2026-08-02.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
 The initial Bearings snapshot correctly has no open decision, and the new teardown gate refuses to erase the source.
 A later regression covers tasks-axi's quoted multi-entry `blocked_by` output so `resolve` matches the first, middle, and last ids and rejects a genuinely absent id.
+The key-grammar regression covers what the gate sees: a keyed, unkeyed, two-key, or malformed status line each opens exactly one decision, and a keyed line opens no `default` record beside it.
 
 The final verification commands and their exact summarized outputs follow.
 
@@ -62,6 +66,9 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+
+$ bash tests/fm-watch-triage.test.sh | grep 'decision key grammar'
+ok - decision key grammar: one line opens exactly one decision, keyed, unkeyed, or refused
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly

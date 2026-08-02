@@ -157,6 +157,13 @@ status_is_paused_or_captain_held() {  # <status-line>
 #   resolved       [key=api-shape]: <how it was decided>
 # A line with no token uses the key "default", preserving the historical
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
+# The token's POSITION is part of the grammar, not a formatting preference: only
+# the prefix before the first colon is parsed for a key. A summary may legitimately
+# mention "[key=...]" as prose ("should docs mention [key=prose]?") and nothing in
+# the line distinguishes that from intent, so a token after the colon is always
+# note text. The fold below is what makes that rule safe to enforce - a line whose
+# key cannot be resolved to exactly one slug still opens exactly one decision,
+# under a reserved key, instead of silently folding into "default".
 # The three parsers are pure reads of a single line; the verb parser strips any
 # key token before the colon so the leading word is recovered cleanly.
 status_line_verb() {  # <status-line> -> leading verb word
@@ -172,20 +179,39 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
     *) printf '%s' "$1" ;;
   esac
 }
-_fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
+_fm_decision_key() {  # <status-line> -> key slug, "default" when no token, or 1
+  local prefix=${1%%:*} k rest
+  # No token at all in the prefix: the historical single-decision default.
   case "$prefix" in
-    *\[key=*\]*)
-      k=${prefix#*\[key=}
-      k=${k%%\]*}
-      case "$k" in
-        ''|*[!A-Za-z0-9._-]*) return 1 ;;
-        *) printf '%s' "$k" ;;
-      esac
-      ;;
-    *) printf 'default' ;;
+    *\[key=*) ;;
+    *) printf 'default'; return 0 ;;
+  esac
+  # A token was intended but the parser cannot resolve it to exactly one slug.
+  # Return 1 in all three cases (unterminated, not a slug, more than one token)
+  # rather than guessing: picking the first token binds the decision to whichever
+  # one happened to come first, and falling back to "default" reopens whatever an
+  # earlier bare "resolved:" line had closed. Callers refuse instead.
+  case "$prefix" in
+    *\[key=*\]*) ;;
+    *) return 1 ;;
+  esac
+  rest=${prefix#*\[key=}
+  k=${rest%%\]*}
+  case "${rest#*\]}" in *\[key=*\]*) return 1 ;; esac
+  case "$k" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    *) printf '%s' "$k" ;;
   esac
 }
+# Reserved key for a line whose own key could not be resolved. "!" can never
+# appear in a valid slug, so such a record collides with no real decision and no
+# captain-held inventory entry, which is what makes the gate in
+# bin/fm-decision-hold.sh reject it by name instead of absorbing it. The offending
+# line number is appended so two unresolvable lines in one file stay distinct
+# rather than overwriting each other, and the status log is append-only so the
+# number is stable across folds. Deliberately not overridable: a home that could
+# retune this could make the reserved key collide with a real slug again.
+FM_CLASSIFY_UNRESOLVED_KEY_PREFIX='!unresolved-key-'
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
 _fm_decision_drop() {  # <open-set> <key>
@@ -204,19 +230,31 @@ EOF
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
 # most-recently-opened-last order; prints nothing when none are open. Pure read of
-# the file, no globals beyond the optional FM_CLASSIFY_RESOLVE_VERB override. This
-# is the durable open-set the fleet snapshot and any point-in-time consumer must use
+# the file, no globals beyond the optional FM_CLASSIFY_RESOLVE_VERB override, and
+# the only write is a stderr diagnostic for a line whose key cannot be resolved.
+# Every non-blank needs-decision/blocked line yields exactly one record, so the set
+# can never quietly gain or lose a decision the log does not name. This is the
+# durable open-set the fleet snapshot and any point-in-time consumer must use
 # instead of trusting the last status line.
 status_open_decisions() {  # <status-file>
-  local f=$1 line verb key note resolve held open='' stripped
+  local f=$1 line verb key note resolve held open='' stripped lineno=0
   [ -f "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
     verb=$(status_line_verb "$line")
-    key=$(_fm_decision_key "$line") || continue
+    # An unresolvable key must never drop the line. Dropping a needs-decision
+    # loses a captain decision outright, and dropping a resolved leaves its
+    # decision open with no trace of the attempt to close it. Record it under the
+    # reserved key and say so on stderr so the offending line is fixable.
+    if ! key=$(_fm_decision_key "$line"); then
+      key="${FM_CLASSIFY_UNRESOLVED_KEY_PREFIX}${lineno}"
+      printf 'fm-classify: %s line %s names no single decision key, recorded as %s: %s\n' \
+        "$f" "$lineno" "$key" "$line" >&2
+    fi
     case "$verb" in
       needs-decision|blocked)
         note=$(status_line_note "$line")
@@ -251,6 +289,12 @@ _fm_status_open_activities_stream() {
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
     verb=$(status_line_verb "$line")
+    # Unlike the decision fold above, an unresolvable key drops the line here.
+    # These records are supersession EVIDENCE, never authoritative crew state, so
+    # both directions of a dropped line are conservative: no open phase claims no
+    # supersession, and a dropped terminal event leaves the older phase open.
+    # Reserving a per-line key instead would strand a phase no later event could
+    # ever close.
     key=$(_fm_decision_key "$line") || continue
     case "$verb" in
       working|"$pause")

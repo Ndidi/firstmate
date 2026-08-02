@@ -192,7 +192,9 @@ test_classifier_primitives() {
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "custom-verb: x" \
     || fail "nonterminal suppression weakened custom bare-line behavior"
   printf 'needs-decision: should docs mention [key=prose]?\nneeds-decision [key=q1]: real choice\nresolved: docs still mention [key=q1]\nneeds-decision [key=bad key]: malformed\n' > "$state/keys.status"
-  open=$(status_open_decisions "$state/keys.status")
+  # The malformed fourth line is deliberate here and its stderr diagnostic is
+  # asserted by test_decision_key_grammar; drop it so the suite output stays clean.
+  open=$(status_open_decisions "$state/keys.status" 2>/dev/null)
   printf '%s' "$open" | grep -F $'q1\t' >/dev/null \
     || fail "a key token in resolved note prose closed the keyed decision"
   printf '%s' "$open" | grep -F $'prose\t' >/dev/null \
@@ -222,6 +224,90 @@ EOF
   [ -z "$(status_open_activities "$state/legacy-activity.status")" ] \
     || fail "a legacy terminal event did not supersede the default working phase"
   pass "classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides"
+}
+
+# The decision-key grammar of status_open_decisions, one case per shape a status
+# line can carry. The invariant every case asserts is the same: ONE
+# needs-decision line opens exactly ONE record. Incident regression - a scout
+# escalating twice ended up with a phantom "default" record beside its two real
+# keys, which put an entry outside the reviewed inventory and failed
+# bin/fm-decision-hold.sh verify at teardown four times in one session. The
+# phantom was never a duplicate of a keyed line; it was a THIRD line whose key
+# token sat after the colon, where the grammar reads it as summary prose.
+test_decision_key_grammar() {
+  local dir state open err count
+  dir=$(make_case decision-key-grammar); state="$dir/state"
+
+  # Keyed: exactly one record, under that key, and NO default record beside it.
+  printf 'working: started\nneeds-decision [key=api-shape]: A or B\n' > "$state/keyed.status"
+  open=$(status_open_decisions "$state/keyed.status" 2>/dev/null)
+  count=$(printf '%s' "$open" | grep -c . || true)
+  [ "$count" = 1 ] || fail "a keyed needs-decision opened $count decisions, expected 1"
+  printf '%s' "$open" | grep -qF $'api-shape\tneeds-decision\tA or B' \
+    || fail "a keyed needs-decision did not open its own key"
+  printf '%s' "$open" | grep -qF $'default\t' \
+    && fail "a keyed needs-decision also opened a default-keyed record"
+
+  # Unkeyed: exactly one record, under default. The historical shape.
+  printf 'working: started\nneeds-decision: A or B\n' > "$state/unkeyed.status"
+  open=$(status_open_decisions "$state/unkeyed.status" 2>/dev/null)
+  count=$(printf '%s' "$open" | grep -c . || true)
+  [ "$count" = 1 ] || fail "an unkeyed needs-decision opened $count decisions, expected 1"
+  printf '%s' "$open" | grep -qF $'default\tneeds-decision\tA or B' \
+    || fail "an unkeyed needs-decision did not open the default key"
+
+  # Two key tokens: the line names two decisions, so the fold refuses to pick one.
+  # Binding it to the first token misattributes the decision and falling back to
+  # default reopens whatever an earlier bare resolved: line closed; both are
+  # silent. The reserved key is loud instead - no captain-held inventory entry can
+  # ever match it, so fm-decision-hold.sh verify rejects it by name.
+  printf 'needs-decision [key=one] [key=two]: A or B\n' > "$state/twokey.status"
+  open=$(status_open_decisions "$state/twokey.status" 2>/dev/null)
+  count=$(printf '%s' "$open" | grep -c . || true)
+  [ "$count" = 1 ] || fail "a two-key needs-decision opened $count decisions, expected 1"
+  printf '%s' "$open" | grep -qE $'^(one|two|default)\t' \
+    && fail "a two-key needs-decision silently picked a key"
+  printf '%s' "$open" | grep -qF $'!unresolved-key-1\tneeds-decision\tA or B' \
+    || fail "a two-key needs-decision was not recorded under the reserved key"
+  err=$(status_open_decisions "$state/twokey.status" 2>&1 >/dev/null)
+  case "$err" in
+    *"$state/twokey.status"*"line 1"*'!unresolved-key-1'*) ;;
+    *) fail "a two-key needs-decision produced no diagnostic naming the file and line" ;;
+  esac
+
+  # An unresolvable key must never DROP the line: losing a needs-decision loses a
+  # captain decision outright, which is worse than the phantom it replaces.
+  printf 'needs-decision [key=bad key]: malformed\n' > "$state/badkey.status"
+  open=$(status_open_decisions "$state/badkey.status" 2>/dev/null)
+  count=$(printf '%s' "$open" | grep -c . || true)
+  [ "$count" = 1 ] || fail "an invalid key slug opened $count decisions, expected 1"
+  printf '%s' "$open" | grep -qF $'!unresolved-key-1\tneeds-decision\tmalformed' \
+    || fail "an invalid key slug did not open a reserved-key decision"
+
+  # Two unresolvable lines stay distinct instead of overwriting each other, and an
+  # unresolvable resolved: closes neither of them nor any real decision.
+  printf 'needs-decision [key=real]: keep me\nneeds-decision [key=bad key]: first\nneeds-decision [key=]: second\nresolved [key=a/b]: closes nothing\n' \
+    > "$state/multibad.status"
+  open=$(status_open_decisions "$state/multibad.status" 2>/dev/null)
+  count=$(printf '%s' "$open" | grep -c . || true)
+  [ "$count" = 3 ] || fail "unresolvable lines collapsed into $count decisions, expected 3"
+  printf '%s' "$open" | grep -qF $'real\tneeds-decision\tkeep me' \
+    || fail "an unresolvable resolved: line closed an unrelated real decision"
+
+  # The end-user reproduction. Two real escalations, the second written with its
+  # key after the colon: the default record belongs to THAT line, and the first
+  # line's keyed record is untouched by it.
+  printf 'needs-decision [key=label-direction]: A, B or E\nresolved [key=label-direction]: E\nneeds-decision: half or full framing [key=phone-framing]\n' \
+    > "$state/misplaced.status"
+  open=$(status_open_decisions "$state/misplaced.status" 2>/dev/null)
+  count=$(printf '%s' "$open" | grep -c . || true)
+  [ "$count" = 1 ] || fail "a misplaced key token opened $count decisions, expected 1"
+  printf '%s' "$open" | grep -qF $'default\tneeds-decision\thalf or full framing [key=phone-framing]' \
+    || fail "a key token after the colon was not left as summary prose under default"
+  printf '%s' "$open" | grep -qF $'label-direction\t' \
+    && fail "a keyed resolved: line failed to close its own decision"
+
+  pass "decision key grammar: one line opens exactly one decision, keyed, unkeyed, or refused"
 }
 
 # crew_is_provably_working: the absorb-only-when-provably-working predicate. It is
@@ -1803,6 +1889,7 @@ test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
+test_decision_key_grammar
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
