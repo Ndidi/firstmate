@@ -283,6 +283,53 @@ test_hook_silent_with_live_lock_and_fresh_beacon() {
   pass "fm-turnend-guard: silent no-op with a live watcher lock and fresh beacon"
 }
 
+test_hook_non_claude_health_ignores_claude_budget_contention() {
+  local dir home pid identity holder harness payload out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-non-claude-budget-contention")
+  home=$(cd "$dir" && pwd)
+  : > "$dir/state/task1.meta"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify non-Claude contention watcher"
+  }
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  printf 'session=claude-episode\ncount=3\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
+  printf 'notice-state\n' > "$dir/state/.claude-autoarm-failure-notified"
+  printf 'alarm-state\n' > "$dir/state/.claude-autoarm-failure-alarmed"
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.turnend-claude-blocks.lock"
+  printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
+  while IFS='|' read -r harness payload; do
+    out=$(printf '%s' "$payload" | FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+    expect_code 0 "$status" "$harness healthy path must ignore Claude budget-lock contention"
+    [ -z "$out" ] || fail "$harness healthy path produced output: $out"
+    [ "$(cat "$dir/state/.turnend-claude-blocks")" = $'session=claude-episode\ncount=3\nepoch=9' ] \
+      || fail "$harness healthy path mutated the Claude block budget"
+    [ "$(cat "$dir/state/.claude-autoarm-failure-notified")" = notice-state ] \
+      || fail "$harness healthy path mutated the Claude failure notice"
+    [ "$(cat "$dir/state/.claude-autoarm-failure-alarmed")" = alarm-state ] \
+      || fail "$harness healthy path mutated the Claude attended alarm"
+    [ "$(cat "$dir/state/.turnend-claude-blocks.lock/pid")" = "$holder" ] \
+      || fail "$harness healthy path replaced the Claude budget-lock owner"
+  done <<EOF
+default|{"stop_hook_active":false}
+Codex|{"cwd":"$dir","stop_hook_active":false}
+OpenCode|{"stop_hook_active":false}
+Pi|{"stop_hook_active":false}
+pi-signed|{"stop_hook_active":false}
+Grok|{"sessionId":"grok-session","stopHookActive":false}
+Kimi|{"stop_hook_active":false}
+EOF
+  kill "$holder" "$pid" 2>/dev/null || true
+  wait "$holder" "$pid" 2>/dev/null || true
+  pass "fm-turnend-guard: healthy non-Claude harness paths ignore Claude episode contention"
+}
+
 test_hook_blocks_with_live_lock_and_stale_beacon() {
   local dir pid identity out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-live-lock-stale")
@@ -1500,6 +1547,7 @@ test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
 test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
+test_hook_non_claude_health_ignores_claude_budget_contention
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
