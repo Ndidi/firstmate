@@ -165,7 +165,7 @@ Observed output:
 ```text
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 fm-doc-audience-check: ok surfaces=61 local_links=170
-FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=104433
+FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=99979
 ```
 
 The broader relevant regression pass was rerun on 2026-08-02 without live-home or daemon mutation.

@@ -394,6 +394,43 @@ fm_lock_release() {
   rmdir "$lockdir" 2>/dev/null || true
 }
 
+fm_failure_episode_reset() {
+  local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
+  lock="$state/.turnend-claude-blocks.lock"
+  case "$mode" in
+    acquire)
+      fm_lock_try_acquire "$lock" || return 1
+      acquired=1
+      ;;
+    held)
+      current=${BASHPID:-$$}
+      pid=$(cat "$lock/pid" 2>/dev/null || true)
+      [ "$pid" = "$current" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  for path in \
+    "$state/.turnend-claude-blocks" \
+    "$state/.claude-autoarm-failure-notified" \
+    "$state/.claude-autoarm-failure-alarmed"
+  do
+    if [ -d "$path" ] && [ ! -L "$path" ]; then
+      [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
+      return 1
+    fi
+  done
+  if ! rm -f \
+    "$state/.turnend-claude-blocks" \
+    "$state/.claude-autoarm-failure-notified" \
+    "$state/.claude-autoarm-failure-alarmed" \
+    2>/dev/null; then
+    [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
+    return 1
+  fi
+  [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
+  return 0
+}
+
 fm_wake_clean_field() {
   LC_ALL=C tr '\t\r\n' '   '
 }

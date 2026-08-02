@@ -416,6 +416,7 @@ test_benign_cycle_end_with_live_watcher_is_silent() {
   identity=$(watcher_identity "$dir" "$pid") || fail "could not identify live watcher holder for benign close"
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
+  printf 'session=sess-autoarm\ncount=3\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
   : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/.claude-autoarm-failure-alarmed"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
@@ -428,9 +429,43 @@ test_benign_cycle_end_with_live_watcher_is_silent() {
   [ -z "$out2" ] || fail "next benign live cycle produced an operator notice: $out2"
   [ "$(epoch_outcome "$dir")" = clean ] || fail "benign live cycle must record outcome=clean, got: $(epoch_outcome "$dir")"
   [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 2 ] || fail "the next Stop-owned cycle must run its own bounded arm"
+  [ ! -e "$dir/state/.turnend-claude-blocks" ] || fail "benign live cycle must clear the prior block budget"
   [ ! -e "$dir/state/.claude-autoarm-failure-notified" ] || fail "benign live cycle must not leave a failure-notice marker"
   [ ! -e "$dir/state/.claude-autoarm-failure-alarmed" ] || fail "benign live cycle must not leave an attended-alarm marker"
   pass "auto-arm: benign cycle end with a live watcher and fresh beacon stays silent across the next cycle"
+}
+
+test_positive_recovery_budget_contention_preserves_episode() {
+  local dir out status pid identity holder
+  dir=$(make_primary_dir "$TMP_ROOT/recovery-budget-contention")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" benign-live
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify live watcher holder for recovery contention"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  printf 'session=sess-autoarm\ncount=3\nepoch=9\n' > "$dir/state/.turnend-claude-blocks"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.turnend-claude-blocks.lock"
+  printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a healthy auto-arm must continue when the episode reset lock is busy"
+  [ -z "$out" ] || fail "recovery contention produced an operator notice: $out"
+  [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "recovery contention must not record ordinary clean recovery"
+  assert_present "$dir/state/.turnend-claude-blocks" "recovery contention partially cleared the block budget"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "recovery contention partially cleared the failure notice"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a later healthy auto-arm must complete the episode reset"
+  assert_absent "$dir/state/.turnend-claude-blocks" "successful retry left the block budget"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "successful retry left the failure notice"
+  pass "auto-arm: budget contention preserves the episode and forces a reset retry"
 }
 
 test_arms_for_x_mode_poll_need_without_inflight() {
@@ -524,6 +559,7 @@ test_failed_cycles_notify_once_and_keep_retrying
 test_unverified_clean_close_exhausts_retries
 test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent
+test_positive_recovery_budget_contention_preserves_episode
 test_arms_for_x_mode_poll_need_without_inflight
 test_single_flight_admits_exactly_one_owner
 test_need_vanished_mid_cycle_closes_quietly

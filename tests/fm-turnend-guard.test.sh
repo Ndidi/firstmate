@@ -1017,10 +1017,11 @@ install_integrated_autoarm() {
 }
 
 run_integrated_autoarm() {
-  local dir=$1
+  local dir=$1 home
+  home=$(cd "$dir" && pwd)
   # shellcheck disable=SC2016 # the fake harness expands FM_HOME inside its child shell.
   printf '{"session_id":"sess-claude-mode","stop_hook_active":false}\n' \
-    | FM_HOME="$dir" "$dir/fake-claude" -c '
+    | FM_HOME="$home" "$dir/fake-claude" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
         "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
       ' 2>&1
@@ -1253,20 +1254,92 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
   out=$(run_integrated_autoarm "$dir"); status=$?
-  guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); guard_status=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  rm -rf "$dir/state/.watch.lock"
   expect_code 0 "$status" "positive watcher recovery must make the auto-arm silent"
-  expect_code 0 "$guard_status" "positive watcher recovery must restore ordinary guard behavior"
   assert_absent "$dir/state/.claude-autoarm-failure-notified" "positive recovery left the failure notice marker"
   assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "positive recovery left the attended alarm marker"
   assert_absent "$dir/state/.turnend-claude-blocks" "positive recovery left the bounded block budget"
+  guard_out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); guard_status=$?
+  expect_code 2 "$guard_status" "a guard after one-shot recovery must start a fresh failure budget"
+  count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
+  [ "$count" = 1 ] || fail "the independent post-recovery failure must start at count 1, got $count"
 
-  rm -rf "$dir/state/.watch.lock"
   out=$(run_integrated_autoarm "$dir"); status=$?
   expect_code 2 "$status" "a later failure after positive recovery must start a new episode"
   assert_contains "$out" "automatic supervision mechanism is broken" "the new failure episode notice was suppressed"
   pass "fm-turnend-guard --claude: integrated fresh failures reach one bounded fail-open, stop continuation, and reset on recovery"
+}
+
+test_hook_claude_mode_recovery_contention_is_not_ordinary_allow() {
+  local dir pid identity holder out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-recovery-contention")
+  : > "$dir/state/task1.meta"
+  seed_claude_budget "$dir" 3
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify recovery-contention watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.turnend-claude-blocks.lock"
+  printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
+  out=$(run_hook_claude "$dir" false); status=$?
+  expect_code 2 "$status" "a healthy guard must continue when the episode reset lock is busy"
+  [ -z "$out" ] || fail "guard recovery contention produced output: $out"
+  assert_present "$dir/state/.turnend-claude-blocks" "guard contention partially cleared the block budget"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "guard contention partially cleared the failure notice"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "guard contention partially cleared the attended alarm"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  out=$(run_hook_claude "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "the healthy guard must allow after completing the episode reset"
+  assert_absent "$dir/state/.turnend-claude-blocks" "successful guard reset left the block budget"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "successful guard reset left the failure notice"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "successful guard reset left the attended alarm"
+  pass "fm-turnend-guard --claude: reset contention preserves all episode state until retry"
+}
+
+test_hook_claude_mode_concurrent_recovery_resets_are_idempotent() {
+  local dir pid identity auto_pid guard_pid auto_status guard_status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-concurrent-recovery")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  write_integrated_failed_arm "$dir"
+  seed_claude_budget "$dir" 3
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify concurrent recovery watcher"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  (run_integrated_autoarm "$dir" > "$dir/auto.out"; printf '%s\n' "$?" > "$dir/auto.status") &
+  auto_pid=$!
+  (FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false > "$dir/guard.out"; printf '%s\n' "$?" > "$dir/guard.status") &
+  guard_pid=$!
+  wait "$auto_pid"
+  wait "$guard_pid"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  auto_status=$(cat "$dir/auto.status")
+  guard_status=$(cat "$dir/guard.status")
+  case "$auto_status:$guard_status" in
+    0:0|0:2|2:0) : ;;
+    *) fail "concurrent reset callers returned unsafe statuses auto=$auto_status guard=$guard_status" ;;
+  esac
+  assert_absent "$dir/state/.turnend-claude-blocks" "concurrent recovery left the block budget"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" "concurrent recovery left the failure notice"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "concurrent recovery left the attended alarm"
+  assert_absent "$dir/state/.claude-autoarm.lock" "concurrent recovery left the owner lock"
+  assert_absent "$dir/state/.turnend-claude-blocks.lock" "concurrent recovery left the budget lock"
+  pass "fm-turnend-guard --claude: concurrent auto-arm and guard resets are idempotent and deadlock-free"
 }
 
 test_hook_claude_mode_stale_rewake_epoch_blocks() {
@@ -1467,6 +1540,8 @@ test_hook_claude_mode_terminal_boundary_excludes_starting_owner
 test_hook_claude_mode_allows_on_fresh_rewake_epoch
 test_hook_claude_mode_preserves_fresh_failed_progression
 test_hook_claude_mode_integrated_monotonic_fail_open
+test_hook_claude_mode_recovery_contention_is_not_ordinary_allow
+test_hook_claude_mode_concurrent_recovery_resets_are_idempotent
 test_hook_claude_mode_stale_rewake_epoch_blocks
 test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once

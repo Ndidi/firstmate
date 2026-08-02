@@ -141,21 +141,14 @@ budget_reset() {
   fm_lock_release "$BUDGET_LOCK"
 }
 
-positive_recovery_reset() {
-  [ "$CLAUDE_MODE" -eq 1 ] || return 0
-  fm_lock_try_acquire "$BUDGET_LOCK" || return 0
-  rm -f "$BUDGET_FILE" "$FAILURE_NOTICE" "$FAILURE_ALARM" 2>/dev/null || true
-  fm_lock_release "$BUDGET_LOCK"
-}
-
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
   exit 0
 fi
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-  positive_recovery_reset
-  exit 0
+  fm_failure_episode_reset "$STATE" && exit 0
+  exit 2
 fi
 
 block_stop() {
@@ -314,7 +307,11 @@ terminal_fail_open() {
     return 1
   fi
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-    rm -f "$BUDGET_FILE" "$FAILURE_NOTICE" "$FAILURE_ALARM" 2>/dev/null || true
+    if ! fm_failure_episode_reset "$STATE" held; then
+      fm_lock_release "$BUDGET_LOCK"
+      fm_lock_release "$OWNER_LOCK"
+      return 1
+    fi
     fm_lock_release "$BUDGET_LOCK"
     fm_lock_release "$OWNER_LOCK"
     return 2
@@ -344,7 +341,7 @@ i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
   if autoarm_owns_recovery; then
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-      positive_recovery_reset
+      fm_failure_episode_reset "$STATE" || exit 2
     fi
     exit 0
   fi
@@ -353,7 +350,7 @@ while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
 done
 if autoarm_owns_recovery; then
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-    positive_recovery_reset
+    fm_failure_episode_reset "$STATE" || exit 2
   fi
   exit 0
 fi
