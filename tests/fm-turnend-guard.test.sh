@@ -19,7 +19,7 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
-REQUIRED_REASON='repair missing watcher supervision with bin/fm-watch-arm.sh as its own Claude Code background task'
+REQUIRED_REASON='the Stop-owned automatic watcher mechanism is broken; inspect its hook registration and startup failure before ending the turn'
 
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------
 
@@ -338,6 +338,16 @@ test_hook_x_mode_reason_sources_cadence() {
   expect_code 2 "$status" "hook must block when in-flight X-mode work has no live watcher"
   assert_contains "$out" "source '$home/config/x-mode.env' first" "block reason must source the effective X-mode cadence"
   pass "fm-turnend-guard: X-mode repair reason sources the cadence config"
+}
+
+test_hook_x_mode_only_blocks_in_default_mode() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-x-mode-only")
+  : > "$dir/state/x-watch.check.sh"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "default hook mode must block an X-mode-only blind turn"
+  assert_contains "$out" "X-mode relay polling needs supervision" "X-mode-only blind stop must identify its supervision need"
+  pass "fm-turnend-guard: X-mode-only supervision remains guarded in default mode"
 }
 
 test_hook_ignores_repo_state_when_fm_home_set() {
@@ -1139,6 +1149,7 @@ test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_blocks_from_fm_home_state
 test_hook_x_mode_reason_sources_cadence
+test_hook_x_mode_only_blocks_in_default_mode
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry

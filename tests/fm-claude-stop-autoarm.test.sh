@@ -106,6 +106,14 @@ printf 'watcher: attached pid=%s (beacon 2s)\n' "$$"
 exit 0
 SH
       ;;
+    benign-live)
+      cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+printf 'watcher: FAILED - cycle ended without an actionable reason\n'
+exit 1
+SH
+      ;;
     slow-actionable)
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -145,7 +153,23 @@ SH
 }
 
 epoch_outcome() {
-  sed -n 's/^.*outcome=\([a-z][a-z]*\) .*$/\1/p' "$1/state/.claude-autoarm-epoch" 2>/dev/null || true
+  sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$1/state/.claude-autoarm-epoch" 2>/dev/null || true
+}
+
+watcher_identity() {
+  local dir=$1 pid=$2
+  FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
+}
+
+record_watcher_lock() {
+  local dir=$1 pid=$2 identity=$3 root bin_dir
+  root=$dir
+  bin_dir=$(cd "$dir/bin" && pwd)
+  mkdir -p "$dir/state/.watch.lock"
+  printf '%s\n' "$pid" > "$dir/state/.watch.lock/pid"
+  printf '%s\n' "$root" > "$dir/state/.watch.lock/fm-home"
+  printf '%s\n' "$bin_dir/fm-watch.sh" > "$dir/state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
 }
 
 # --- registration contract ----------------------------------------------------
@@ -320,11 +344,29 @@ test_failed_close_rewakes_with_failure_banner() {
   write_arm_fixture "$dir" failed
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   expect_code 2 "$status" "a typed watcher failure must rewake as an alarm"
-  assert_contains "$out" "watcher cycle FAILED" "failure rewake must carry the failure banner"
+  assert_contains "$out" "automatic supervision mechanism is broken" "failure rewake must describe the automatic mechanism failure"
   assert_contains "$out" "watcher: FAILED" "failure rewake must carry the arm's typed failure"
-  assert_contains "$out" "repair supervision" "failure rewake must direct the manual repair"
-  [ "$(epoch_outcome "$dir")" = rewake ] || fail "epoch must record outcome=rewake, got: $(epoch_outcome "$dir")"
-  pass "auto-arm: watcher: FAILED translates to an exit-2 alarm rewake"
+  assert_not_contains "$out" "bin/fm-watch-arm.sh" "failure rewake must not create a manual arm loop"
+  [ "$(epoch_outcome "$dir")" = failed ] || fail "epoch must record outcome=failed, got: $(epoch_outcome "$dir")"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 2 ] || fail "failure must exhaust exactly two bounded arm attempts"
+  pass "auto-arm: bounded failure verification emits one automatic-mechanism alarm"
+}
+
+test_failed_cycles_notify_only_once() {
+  local dir out1 out2 status1 status2
+  dir=$(make_primary_dir "$TMP_ROOT/failed-dedup")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  out1=$(run_autoarm "$dir" 2>/dev/null); status1=$?
+  out2=$(run_autoarm "$dir" 2>/dev/null); status2=$?
+  expect_code 2 "$status1" "the first exhausted failure must notify"
+  expect_code 0 "$status2" "a consecutive exhausted failure must remain silent"
+  [ -n "$out1" ] || fail "the first exhausted failure did not notify"
+  [ -z "$out2" ] || fail "consecutive exhausted failure repeated an operator notice: $out2"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 4 ] || fail "each cycle must retain bounded automatic retries"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "failure episode marker was not recorded"
+  [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "second failure must record failed-suppressed"
+  pass "auto-arm: consecutive failed cycles cannot repeat an operator-repair prompt"
 }
 
 test_clean_close_exits_silently() {
@@ -337,6 +379,30 @@ test_clean_close_exits_silently() {
   [ -z "$out" ] || fail "clean close produced output: $out"
   [ "$(epoch_outcome "$dir")" = clean ] || fail "epoch must record outcome=clean, got: $(epoch_outcome "$dir")"
   pass "auto-arm: clean close exits silently with a clean epoch"
+}
+
+test_benign_cycle_end_with_live_watcher_is_silent() {
+  local dir out out2 status status2 pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/benign-live")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" benign-live
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || fail "could not identify live watcher holder for benign close"
+  record_watcher_lock "$dir" "$pid" "$identity"
+  touch "$dir/state/.last-watcher-beat"
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  out2=$(run_autoarm "$dir" 2>/dev/null); status2=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "a failed-looking cycle with a live fresh watcher must be benign"
+  expect_code 0 "$status2" "the next Stop-owned cycle must remain benign with the live watcher"
+  [ -z "$out" ] || fail "benign live cycle produced an operator notice: $out"
+  [ -z "$out2" ] || fail "next benign live cycle produced an operator notice: $out2"
+  [ "$(epoch_outcome "$dir")" = clean ] || fail "benign live cycle must record outcome=clean, got: $(epoch_outcome "$dir")"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 2 ] || fail "the next Stop-owned cycle must run its own bounded arm"
+  [ ! -e "$dir/state/.claude-autoarm-failure-notified" ] || fail "benign live cycle must not leave a failure-notice marker"
+  pass "auto-arm: benign cycle end with a live watcher and fresh beacon stays silent across the next cycle"
 }
 
 test_arms_for_x_mode_poll_need_without_inflight() {
@@ -426,7 +492,9 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
 test_failed_close_rewakes_with_failure_banner
+test_failed_cycles_notify_only_once
 test_clean_close_exits_silently
+test_benign_cycle_end_with_live_watcher_is_silent
 test_arms_for_x_mode_poll_need_without_inflight
 test_single_flight_admits_exactly_one_owner
 test_need_vanished_mid_cycle_closes_quietly
