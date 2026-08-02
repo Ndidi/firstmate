@@ -5,10 +5,11 @@
 # First, always warn if the firstmate primary checkout (FM_ROOT) is on a named
 # non-default branch, because that means firstmate-on-itself work landed in the
 # primary instead of an isolated worktree.
-# Then, if any task is in flight (a state/<id>.meta exists) and no
-# identity-matched watcher with a liveness beacon (state/.last-watcher-beat,
-# touched every poll cycle) is fresh within FM_GUARD_GRACE seconds, prints a
-# loud, clearly delimited banner so the agent cannot skim past it in the tool output of whatever it was
+# Then, if a task is in flight (a state/<id>.meta exists) or X-mode relay
+# polling is active (state/x-watch.check.sh exists) and no identity-matched
+# watcher has a liveness beacon (state/.last-watcher-beat, touched every poll
+# cycle) fresh within FM_GUARD_GRACE seconds, prints a loud, clearly delimited
+# banner so the agent cannot skim past it in the tool output of whatever it was
 # doing - the one channel every harness has. The full banner is emitted once per
 # distinct staleness episode in this FM_HOME (keyed to beacon mtime or absence);
 # later guarded commands in the same episode print a one-line reminder instead.
