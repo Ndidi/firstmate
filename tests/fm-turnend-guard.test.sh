@@ -993,8 +993,15 @@ seed_claude_failure() {
 }
 
 seed_claude_budget() {
-  local dir=$1 count=$2
-  printf 'session=sess-claude-mode\ncount=%s\n' "$count" > "$dir/state/.turnend-claude-blocks"
+  local dir=$1 count=$2 epoch=${3:-2}
+  printf 'session=sess-claude-mode\ncount=%s\nepoch=%s\n' "$count" "$epoch" > "$dir/state/.turnend-claude-blocks"
+}
+
+record_autoarm_owner() {
+  local dir=$1 pid=$2
+  mkdir -p "$dir/state/.claude-autoarm.lock"
+  printf '%s\n' "$pid" > "$dir/state/.claude-autoarm.lock/pid"
+  printf 'autoarm\n' > "$dir/state/.claude-autoarm.lock/role"
 }
 
 install_integrated_autoarm() {
@@ -1055,25 +1062,116 @@ test_hook_claude_mode_reblocks_x_mode_without_tasks() {
 }
 
 test_hook_claude_mode_allows_when_autoarm_owner_alive() {
-  local dir pid out status count
+  local dir pid out out2 status status2 count count2
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-owner")
   : > "$dir/state/task1.meta"
   seed_claude_failure "$dir"
   seed_claude_budget "$dir" 3
   sleep 60 &
   pid=$!
-  mkdir -p "$dir/state/.claude-autoarm.lock"
-  printf '%s\n' "$pid" > "$dir/state/.claude-autoarm.lock/pid"
+  record_autoarm_owner "$dir" "$pid"
   out=$(run_hook_claude "$dir" false); status=$?
+  count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
+  out2=$(run_hook_claude "$dir" false); status2=$?
+  count2=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   expect_code 0 "$status" "--claude mode must allow when the auto-arm owner process is alive"
+  expect_code 0 "$status2" "--claude mode must keep allowing the same live auto-arm epoch"
   [ -z "$out" ] || fail "--claude owner-claimed allow produced output: $out"
-  count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
-  [ "$count" = 3 ] || fail "live auto-arm owner reset failure progression from 3 to $count"
+  [ -z "$out2" ] || fail "repeated same-owner allow produced output: $out2"
+  [ "$count" = 4 ] || fail "new live auto-arm epoch did not advance failure progression from 3 to 4: $count"
+  [ "$count2" = 4 ] || fail "repeated observation advanced the same auto-arm epoch twice: $count2"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "live auto-arm owner cleared the failure episode"
   assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "live automatic continuation emitted the attended fail-open alarm"
-  pass "fm-turnend-guard --claude: live auto-arm owner preserves the active failure progression"
+  pass "fm-turnend-guard --claude: a live arming epoch advances once and repeated observation is idempotent"
+}
+
+test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open() {
+  local dir out status pid i count epoch
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-arming-interleavings")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  printf 'epoch=3 owner_pid=999 outcome=failed updated_at=%s\n' "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  out=$(run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "the first verified failed epoch must own its automatic handoff"
+
+  epoch=3
+  for i in 1 2 3 4; do
+    epoch=$((epoch + 1))
+    sleep 60 &
+    pid=$!
+    record_autoarm_owner "$dir" "$pid"
+    printf 'epoch=%s owner_pid=%s outcome=arming updated_at=%s\n' "$epoch" "$pid" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+    out=$(run_hook_claude "$dir" true); status=$?
+    expect_code 0 "$status" "active arming epoch $i must own its Stop while advancing the failure budget"
+    count=$(sed -n '2s/^count=//p' "$dir/state/.turnend-claude-blocks")
+    [ "$count" = "$i" ] || fail "arming epoch $i produced non-monotonic count $count"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rm -rf "$dir/state/.claude-autoarm.lock"
+    epoch=$((epoch + 1))
+    printf 'epoch=%s owner_pid=999 outcome=failed-suppressed updated_at=%s\n' "$epoch" "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  done
+
+  out=$(run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "repeated failed-to-arming interleavings must reach terminal fail-open"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "arming interleavings stalled before the bounded fail-open"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "arming interleavings did not consume the one-time alarm"
+  pass "fm-turnend-guard --claude: repeated failed-to-arming races make bounded monotonic progress"
+}
+
+test_hook_claude_mode_terminal_boundary_excludes_starting_owner() {
+  local dir fakebin ready release once guard_out guard_status auto_out auto_status guard_pid
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-terminal-boundary")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  printf 'epoch=3 owner_pid=999 outcome=failed-suppressed updated_at=%s\n' "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  seed_claude_budget "$dir" 4 3
+  install_integrated_autoarm "$dir"
+  write_integrated_failed_arm "$dir"
+  fakebin="$dir/fakebin"
+  ready="$dir/terminal-ready"
+  release="$dir/terminal-release"
+  once="$dir/terminal-once"
+  guard_out="$dir/guard.out"
+  guard_status="$dir/guard.status"
+  mkdir -p "$fakebin"
+  mkfifo "$ready" "$release"
+  cat > "$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = "$FM_TERMINAL_ROLE_PATH" ] \
+  && [ "$(/bin/cat "$1" 2>/dev/null || true)" = terminal-check ] \
+  && (set -C; : > "$FM_TERMINAL_ONCE") 2>/dev/null; then
+  printf 'ready\n' > "$FM_TERMINAL_READY"
+  IFS= read -r _ < "$FM_TERMINAL_RELEASE"
+fi
+exec /bin/cat "$@"
+SH
+  chmod +x "$fakebin/cat"
+  (
+    printf '{"stop_hook_active":true,"session_id":"sess-claude-mode"}' \
+      | PATH="$fakebin:$PATH" \
+        FM_TERMINAL_ROLE_PATH="$dir/state/.claude-autoarm.lock/role" \
+        FM_TERMINAL_READY="$ready" \
+        FM_TERMINAL_RELEASE="$release" \
+        FM_TERMINAL_ONCE="$once" \
+        CLAUDECODE=1 FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" --claude \
+          > "$guard_out" 2>&1
+    printf '%s\n' "$?" > "$guard_status"
+  ) &
+  guard_pid=$!
+  IFS= read -r _ < "$ready"
+  auto_out=$(run_integrated_autoarm "$dir"); auto_status=$?
+  printf 'release\n' > "$release"
+  wait "$guard_pid"
+  expect_code 0 "$auto_status" "an owner starting inside the terminal window must lose the existing owner boundary"
+  [ -z "$auto_out" ] || fail "excluded terminal-window owner produced output: $auto_out"
+  assert_absent "$dir/state/arm-ran" "excluded terminal-window owner started an arm cycle"
+  expect_code 0 "$(cat "$guard_status")" "terminal boundary guard must complete without deadlock"
+  assert_contains "$(cat "$guard_out")" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "terminal boundary did not produce the one-time alarm"
+  assert_absent "$dir/state/.claude-autoarm.lock" "terminal boundary left its owner lock behind"
+  pass "fm-turnend-guard --claude: terminal owner boundary excludes a concurrent start without deadlock"
 }
 
 test_hook_claude_mode_allows_on_fresh_rewake_epoch() {
@@ -1284,9 +1382,8 @@ test_hook_claude_mode_waits_for_late_claim() {
   : > "$dir/state/task1.meta"
   (
     sleep 0.4
-    mkdir -p "$dir/state/.claude-autoarm.lock"
     sleep 60 &
-    printf '%s\n' $! > "$dir/state/.claude-autoarm.lock/pid"
+    record_autoarm_owner "$dir" $!
     printf '%s\n' $! > "$dir/holder.pid"
     wait
   ) &
@@ -1310,8 +1407,7 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
   assert_contains "$out" "TURN WOULD END BLIND" "--claude secondmate re-block must carry the blind-turn banner"
   sleep 60 &
   pid=$!
-  mkdir -p "$dir/state/.claude-autoarm.lock"
-  printf '%s\n' "$pid" > "$dir/state/.claude-autoarm.lock/pid"
+  record_autoarm_owner "$dir" "$pid"
   out=$(run_hook_claude "$dir" false); status=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
@@ -1366,6 +1462,8 @@ test_pi_extension_retries_after_followup_delivery_failure
 test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive
+test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open
+test_hook_claude_mode_terminal_boundary_excludes_starting_owner
 test_hook_claude_mode_allows_on_fresh_rewake_epoch
 test_hook_claude_mode_preserves_fresh_failed_progression
 test_hook_claude_mode_integrated_monotonic_fail_open

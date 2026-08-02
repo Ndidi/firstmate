@@ -130,18 +130,22 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
+OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
+  fm_lock_try_acquire "$BUDGET_LOCK" || return 0
   rm -f "$BUDGET_FILE" 2>/dev/null || true
+  fm_lock_release "$BUDGET_LOCK"
 }
 
 positive_recovery_reset() {
-  budget_reset
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
-  rm -f "$FAILURE_NOTICE" "$FAILURE_ALARM" 2>/dev/null || true
+  fm_lock_try_acquire "$BUDGET_LOCK" || return 0
+  rm -f "$BUDGET_FILE" "$FAILURE_NOTICE" "$FAILURE_ALARM" 2>/dev/null || true
+  fm_lock_release "$BUDGET_LOCK"
 }
 
 fm_supervision_status "$STATE" "$GRACE"
@@ -190,85 +194,139 @@ fi
 # The Stop-owned auto-arm fires on the same Stop event. Give it a brief bounded
 # window to prove it owns recovery for this event epoch before consuming one of
 # Claude's bounded continuations.
-failure_handoff_for_current_epoch() {
-  local current_epoch old_session old_count old_epoch tmp rc
+budget_account_current_epoch() {
+  local current_epoch outcome old_session old_count old_epoch tmp initialized
   fm_lock_try_acquire "$BUDGET_LOCK" || return 1
   current_epoch=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
-  rc=1
-  if [ -n "$current_epoch" ] && [ -f "$BUDGET_FILE" ]; then
+  outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  initialized=0
+  COUNT=0
+  if [ -f "$BUDGET_FILE" ]; then
     old_session=$(sed -n '1s/^session=//p' "$BUDGET_FILE" 2>/dev/null || true)
     old_count=$(sed -n '2s/^count=//p' "$BUDGET_FILE" 2>/dev/null || true)
     old_epoch=$(sed -n '3s/^epoch=//p' "$BUDGET_FILE" 2>/dev/null || true)
     case "$old_count" in
       ''|*[!0-9]*) old_count=0 ;;
     esac
-    if [ "$old_session" = "$SESSION_ID" ] \
-      && [ "$old_epoch" = "$current_epoch" ] \
-      && [ "$old_count" -lt "$BLOCK_BUDGET" ]; then
-      rc=0
+    if [ "$old_session" = "$SESSION_ID" ]; then
+      COUNT=$old_count
+      if [ -n "$current_epoch" ] && [ "$old_epoch" = "$current_epoch" ]; then
+        :
+      else
+        COUNT=$((COUNT + 1))
+      fi
     fi
-  elif [ -n "$current_epoch" ]; then
-    # The first exhausted notice owns this stop event, but its progress must be
-    # retained so later fresh failed epochs cannot reset the bounded fail-open.
-    tmp="$BUDGET_FILE.tmp.$$"
-    if printf 'session=%s\ncount=0\nepoch=%s\n' "$SESSION_ID" "$current_epoch" > "$tmp" 2>/dev/null \
-      && mv -f "$tmp" "$BUDGET_FILE" 2>/dev/null; then
-      rc=0
-    fi
-    rm -f "$tmp" 2>/dev/null || true
   fi
-  fm_lock_release "$BUDGET_LOCK"
-  return "$rc"
-}
-
-budget_consume_block() {
-  local old_session old_count
-  fm_lock_try_acquire "$BUDGET_LOCK" || return 1
-  COUNT=0
-  if [ -f "$BUDGET_FILE" ]; then
-    old_session=$(sed -n '1s/^session=//p' "$BUDGET_FILE" 2>/dev/null || true)
-    old_count=$(sed -n '2s/^count=//p' "$BUDGET_FILE" 2>/dev/null || true)
-    case "$old_count" in
-      ''|*[!0-9]*) old_count=0 ;;
+  if [ ! -f "$BUDGET_FILE" ] || [ "${old_session:-}" != "$SESSION_ID" ]; then
+    case "$outcome" in
+      failed|failed-suppressed)
+        if [ -e "$FAILURE_NOTICE" ]; then
+          initialized=1
+          COUNT=0
+        else
+          COUNT=1
+        fi
+        ;;
+      *) COUNT=1 ;;
     esac
-    [ "$old_session" = "$SESSION_ID" ] && COUNT=$old_count
   fi
-  COUNT=$((COUNT + 1))
-  printf 'session=%s\ncount=%s\nepoch=%s\n' "$SESSION_ID" "$COUNT" "$CURRENT_EPOCH" > "$BUDGET_FILE" 2>/dev/null || {
+  tmp="$BUDGET_FILE.tmp.$$"
+  if ! printf 'session=%s\ncount=%s\nepoch=%s\n' "$SESSION_ID" "$COUNT" "$current_epoch" > "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$BUDGET_FILE" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null || true
     fm_lock_release "$BUDGET_LOCK"
     return 1
-  }
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  BUDGET_INITIALIZED_FAILURE=$initialized
   fm_lock_release "$BUDGET_LOCK"
   return 0
 }
 
 autoarm_owns_recovery() {
-  local pid outcome age
+  local pid role outcome age
   fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && return 0
-  pid=$(cat "$STATE/.claude-autoarm.lock/pid" 2>/dev/null || true)
-  fm_pid_alive "$pid" && return 0
+  pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
+  role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
+  if fm_pid_alive "$pid" && [ "$role" = autoarm ]; then
+    [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
+    return 0
+  fi
   outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in
     rewake)
       age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
-      [ "$age" -lt "$EPOCH_FRESH" ] && return 0
+      if [ "$age" -lt "$EPOCH_FRESH" ]; then
+        [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
+        return 0
+      fi
       ;;
     failed)
       age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
       if [ "$age" -lt "$EPOCH_FRESH" ] && [ -e "$FAILURE_NOTICE" ] \
-        && failure_handoff_for_current_epoch; then
-        return 0
+        && budget_account_current_epoch; then
+        [ "$BUDGET_INITIALIZED_FAILURE" -eq 1 ] && return 0
       fi
       ;;
     failed-suppressed)
       age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
       if [ "$age" -lt "$EPOCH_FRESH" ] && [ -e "$FAILURE_NOTICE" ] \
-        && failure_handoff_for_current_epoch; then
-        return 0
+        && budget_account_current_epoch; then
+        :
       fi
       ;;
   esac
   return 1
+}
+
+terminal_fail_open() {
+  local pid role old_session old_count
+  [ "$COUNT" -gt "$BLOCK_BUDGET" ] || return 1
+  failure_episode_verified || return 1
+  [ ! -e "$FAILURE_ALARM" ] || return 1
+  if ! fm_lock_try_acquire "$OWNER_LOCK"; then
+    pid=$(cat "$OWNER_LOCK/pid" 2>/dev/null || true)
+    role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
+    if fm_pid_alive "$pid" && [ "$role" = autoarm ]; then
+      return 2
+    fi
+    return 1
+  fi
+  if ! fm_lock_set_role "$OWNER_LOCK" terminal-check; then
+    fm_lock_release "$OWNER_LOCK"
+    return 1
+  fi
+  if ! fm_lock_try_acquire "$BUDGET_LOCK"; then
+    fm_lock_release "$OWNER_LOCK"
+    return 1
+  fi
+  old_session=$(sed -n '1s/^session=//p' "$BUDGET_FILE" 2>/dev/null || true)
+  old_count=$(sed -n '2s/^count=//p' "$BUDGET_FILE" 2>/dev/null || true)
+  case "$old_count" in
+    ''|*[!0-9]*) old_count=0 ;;
+  esac
+  role=$(fm_lock_role "$OWNER_LOCK" 2>/dev/null || true)
+  if [ "$role" != terminal-check ] || [ "$old_session" != "$SESSION_ID" ] \
+    || [ "$old_count" -le "$BLOCK_BUDGET" ] || ! failure_episode_verified \
+    || [ -e "$FAILURE_ALARM" ]; then
+    fm_lock_release "$BUDGET_LOCK"
+    fm_lock_release "$OWNER_LOCK"
+    return 1
+  fi
+  if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+    rm -f "$BUDGET_FILE" "$FAILURE_NOTICE" "$FAILURE_ALARM" 2>/dev/null || true
+    fm_lock_release "$BUDGET_LOCK"
+    fm_lock_release "$OWNER_LOCK"
+    return 2
+  fi
+  if ! (set -C; : > "$FAILURE_ALARM") 2>/dev/null; then
+    fm_lock_release "$BUDGET_LOCK"
+    fm_lock_release "$OWNER_LOCK"
+    return 1
+  fi
+  fm_lock_release "$BUDGET_LOCK"
+  fm_lock_release "$OWNER_LOCK"
+  return 0
 }
 
 failure_episode_verified() {
@@ -302,28 +360,19 @@ fi
 
 # The auto-arm genuinely failed to establish: consume the bounded re-block
 # budget before considering the verified one-time attended fail-open.
-CURRENT_EPOCH=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
-budget_consume_block || block_stop
-if [ "$COUNT" -gt "$BLOCK_BUDGET" ]; then
-  if failure_episode_verified && [ ! -e "$FAILURE_ALARM" ]; then
-    if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-      positive_recovery_reset
-      exit 0
-    fi
-    if autoarm_owns_recovery; then
-      exit 0
-    fi
-    if (set -C; : > "$FAILURE_ALARM") 2>/dev/null; then
-      if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
-        NEED_DESC="$FM_SUP_IN_FLIGHT task(s) in flight"
-      elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
-        NEED_DESC="$FM_SUP_SOURCES process-event source(s) registered"
-      else
-        NEED_DESC="X-mode relay polling active"
-      fi
-      printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
-      exit 0
-    fi
+budget_account_current_epoch || block_stop
+terminal_fail_open
+terminal_status=$?
+if [ "$terminal_status" -eq 0 ]; then
+  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
+    NEED_DESC="$FM_SUP_IN_FLIGHT task(s) in flight"
+  elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
+    NEED_DESC="$FM_SUP_SOURCES process-event source(s) registered"
+  else
+    NEED_DESC="X-mode relay polling active"
   fi
+  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
+  exit 0
 fi
+[ "$terminal_status" -eq 2 ] && exit 0
 block_stop

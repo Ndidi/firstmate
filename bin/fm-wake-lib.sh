@@ -113,8 +113,27 @@ fm_lock_clean_known_files() {
     "$lockdir/pid" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
+    "$lockdir/role" \
     "$lockdir/watcher-path" \
     2>/dev/null || true
+}
+
+fm_lock_set_role() {
+  local lockdir=$1 role=$2 current pid back
+  case "$role" in
+    autoarm|terminal-check) : ;;
+    *) return 1 ;;
+  esac
+  current=${BASHPID:-$$}
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$pid" = "$current" ] || return 1
+  printf '%s\n' "$role" > "$lockdir/role" 2>/dev/null || return 1
+  back=$(cat "$lockdir/role" 2>/dev/null || true)
+  [ "$back" = "$role" ]
+}
+
+fm_lock_role() {
+  cat "$1/role" 2>/dev/null
 }
 
 fm_lock_abs_path() {

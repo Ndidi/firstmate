@@ -125,6 +125,10 @@ fi
 # owner foregrounds the arm and translates its close; every other firing exits
 # 0 so one watcher cycle maps to at most one exit-2 rewake.
 fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
+  fm_lock_release "$OWNER_LOCK"
+  exit 0
+fi
 trap 'fm_lock_release "$OWNER_LOCK"' EXIT
 
 write_epoch() {  # <outcome>
