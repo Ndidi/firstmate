@@ -18,7 +18,7 @@ When this session owns supervision and away mode is not active:
    [`watcher-continuity.md`](../watcher-continuity.md) owns the exact session-lock recovery boundary.
 8. The turn-end guard (`bin/fm-turnend-guard.sh --claude`) remains the final backstop.
    It uses the same live-watcher and fresh-beacon predicate as the pull guard.
-   It allows the stop when a watcher is healthy, when the auto-arm already owns recovery for this event epoch, or when a fresh rewake is recorded; it re-blocks only when none of those materialize, within a bounded budget.
+   It allows the stop when a watcher is healthy, when the auto-arm already owns recovery for this event epoch, or when a fresh exit-2 outcome is recorded; it re-blocks only when none of those materialize, within a bounded budget.
 9. Waiting on the hook-owned cycle is silent: do not send idle progress while the watcher is parked.
 
 The watcher itself remains `bin/fm-watch.sh`, and `bin/fm-watch-arm.sh` remains the verified arm wrapper that the Stop hook foregrounds.

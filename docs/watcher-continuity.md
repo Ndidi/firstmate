@@ -16,6 +16,9 @@ The stale-owner claim occurs only after the existing AFK and supervision-need ga
 After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon before retrying a bounded number of times.
 A cycle-end failure is benign when that live-watcher predicate is true, and the hook suppresses the arm output and continues silently.
 Only an exhausted failure with no verified watcher emits one last-resort notice for the continuous failure episode; later consecutive Stop cycles exit 2 to guarantee another Stop-owned retry without repeating the notice.
+The Claude turn-end guard treats those fresh exit-2 failure epochs as automatic continuations rather than consuming its block budget.
+If the automatic mechanism later disappears, the guard permits one loud attended fail-open only after the verified failure notice and block budget are both exhausted and a final check finds no watcher or continuation.
+That alarm cannot repeat until positive watcher recovery clears the failure episode.
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
 
 ## Actionable wake ordering

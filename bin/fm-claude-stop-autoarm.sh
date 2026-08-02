@@ -42,7 +42,8 @@
 # outcome so the synchronous Stop guard (bin/fm-turnend-guard.sh --claude) can
 # allow a stop whose recovery this hook already owns, instead of forcing a
 # duplicate continuation for the same event epoch. The failure marker
-# state/.claude-autoarm-failure-notified deduplicates the last-resort notice.
+# state/.claude-autoarm-failure-notified deduplicates the last-resort notice,
+# and state/.claude-autoarm-failure-alarmed bounds the attended fail-open.
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
 # exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
@@ -60,6 +61,7 @@ GRACE=${FM_GUARD_GRACE:-300}
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 EPOCH="$STATE/.claude-autoarm-epoch"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
+FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 AUTOARM_ATTEMPTS=${FM_CLAUDE_AUTOARM_ATTEMPTS:-2}
 case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
@@ -99,13 +101,13 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
 fi
 
 # --- AFK: the away daemon owns the watcher and triage; never rewake ----------
-[ -e "$STATE/.afk" ] && { rm -f "$FAILURE_NOTICE" 2>/dev/null || true; exit 0; }
+[ -e "$STATE/.afk" ] && exit 0
 
 # --- need: in-flight work or an X-mode relay poll ----------------------------
 need_supervision() {
   fm_supervision_needed "$STATE" "$GRACE"
 }
-need_supervision || { rm -f "$FAILURE_NOTICE" 2>/dev/null || true; exit 0; }
+need_supervision || exit 0
 
 # --- stale session-lock recovery ---------------------------------------------
 # Delegate the claim to fm-lock.sh so its live-owner refusal and write semantics
@@ -168,7 +170,6 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   # every subsequent classification and handoff.
   if [ -e "$STATE/.afk" ]; then
     write_epoch afk
-    rm -f "$FAILURE_NOTICE" 2>/dev/null || true
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0
   fi
@@ -194,20 +195,19 @@ done
 # left to supervise, so close quietly instead of waking the model.
 if ! need_supervision; then
   write_epoch clean
-  rm -f "$FAILURE_NOTICE" 2>/dev/null || true
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
 
 if [ "$HEALTHY" -eq 1 ]; then
   write_epoch clean
-  rm -f "$FAILURE_NOTICE" 2>/dev/null || true
+  rm -f "$FAILURE_NOTICE" "$FAILURE_ALARM" 2>/dev/null || true
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
 
 if [ "$ACTIONABLE" -eq 1 ]; then
-  rm -f "$FAILURE_NOTICE" 2>/dev/null || true
+  rm -f "$FAILURE_NOTICE" "$FAILURE_ALARM" 2>/dev/null || true
   write_epoch rewake
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
@@ -223,13 +223,13 @@ fi
 # later invocation still exits 2 so Claude must continue into another Stop-owned
 # retry without creating a repeated operator notice or manual-arm loop.
 if [ ! -e "$FAILURE_NOTICE" ]; then
-  : > "$FAILURE_NOTICE" 2>/dev/null || true
   write_epoch failed
   {
     printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after %s bounded attempts, and no live watcher with a fresh beacon was verified.\n' "$attempt"
     [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
     printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n'
   } >&2
+  : > "$FAILURE_NOTICE" 2>/dev/null || true
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 2
 fi

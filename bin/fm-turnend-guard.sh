@@ -48,15 +48,14 @@
 #   1. a live identity-matched watcher with a fresh beacon allows immediately;
 #   2. otherwise wait briefly (FM_CLAUDE_AUTOARM_SYNC_WAIT_MS, default 800ms)
 #      for the auto-arm to claim this home (state/.claude-autoarm.lock owner
-#      alive) or to record a fresh rewake outcome (state/.claude-autoarm-epoch)
-#      for this event epoch - either proof allows without consuming a
-#      continuation, so one event epoch yields exactly one recovery turn;
+#      alive) or to record a fresh exit-2 outcome
+#      (state/.claude-autoarm-epoch) for this event epoch - either proof allows
+#      without consuming a continuation, so one event epoch yields exactly one recovery turn;
 #   3. only when neither materializes is the auto-arm genuinely absent: re-block
 #      with the repair banner, bounded to FM_CLAUDE_TURNEND_BLOCK_BUDGET
 #      (default 3) consecutive blocks per session - safely below Claude Code's
-#      hard 8-consecutive-block override - then allow degraded with a visible
-#      systemMessage so the session can always end.
-# Any allow resets the consecutive-block budget.
+#      hard 8-consecutive-block override - then allow one loud attended
+#      fail-open only for an already verified failure episode.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -128,9 +127,17 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
+FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
+FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
   rm -f "$BUDGET_FILE" 2>/dev/null || true
+}
+
+positive_recovery_reset() {
+  budget_reset
+  [ "$CLAUDE_MODE" -eq 1 ] || return 0
+  rm -f "$FAILURE_NOTICE" "$FAILURE_ALARM" 2>/dev/null || true
 }
 
 fm_supervision_status "$STATE" "$GRACE"
@@ -139,7 +146,7 @@ if [ "$FM_SUP_NEEDED" = false ]; then
   exit 0
 fi
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-  budget_reset
+  positive_recovery_reset
   exit 0
 fi
 
@@ -184,31 +191,51 @@ autoarm_owns_recovery() {
   fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && return 0
   pid=$(cat "$STATE/.claude-autoarm.lock/pid" 2>/dev/null || true)
   fm_pid_alive "$pid" && return 0
-  outcome=$(sed -n 's/^.*outcome=\([a-z][a-z]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
-  if [ "$outcome" = rewake ]; then
-    age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
-    [ "$age" -lt "$EPOCH_FRESH" ] && return 0
-  fi
+  outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  case "$outcome" in
+    rewake|failed|failed-suppressed)
+      age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
+      [ "$age" -lt "$EPOCH_FRESH" ] && return 0
+      ;;
+  esac
   return 1
+}
+
+failure_episode_verified() {
+  local outcome
+  [ ! -e "$STATE/.afk" ] || return 1
+  [ -e "$FAILURE_NOTICE" ] || return 1
+  outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  case "$outcome" in
+    failed|failed-suppressed) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
   if autoarm_owns_recovery; then
-    budget_reset
+    if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+      positive_recovery_reset
+    else
+      budget_reset
+    fi
     exit 0
   fi
   sleep 0.1
   i=$((i + 1))
 done
 if autoarm_owns_recovery; then
-  budget_reset
+  if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+    positive_recovery_reset
+  else
+    budget_reset
+  fi
   exit 0
 fi
 
-# The auto-arm genuinely failed to establish: re-block, but never past the
-# budget so the session can always end and Claude's 8-block override is never
-# approached.
+# The auto-arm genuinely failed to establish: consume the bounded re-block
+# budget before considering the verified one-time attended fail-open.
 SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
 COUNT=0
 if [ -f "$BUDGET_FILE" ]; then
@@ -220,17 +247,28 @@ if [ -f "$BUDGET_FILE" ]; then
   [ "$old_session" = "$SESSION_ID" ] && COUNT=$old_count
 fi
 COUNT=$((COUNT + 1))
-if [ "$COUNT" -gt "$BLOCK_BUDGET" ]; then
-  budget_reset
-  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
-    NEED_DESC="$FM_SUP_IN_FLIGHT task(s) in flight"
-  elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
-    NEED_DESC="$FM_SUP_SOURCES process-event source(s) registered"
-  else
-    NEED_DESC="X-mode relay polling active"
-  fi
-  printf '{"systemMessage":"firstmate turn-end guard: %s with no live watcher and no Stop auto-arm claim; block budget exhausted, allowing this stop. The Stop-owned automatic watcher mechanism is broken; inspect its hook registration and startup failure before ending blind."}\n' "$NEED_DESC"
-  exit 0
-fi
 printf 'session=%s\ncount=%s\n' "$SESSION_ID" "$COUNT" > "$BUDGET_FILE" 2>/dev/null || true
+if [ "$COUNT" -gt "$BLOCK_BUDGET" ]; then
+  if failure_episode_verified && [ ! -e "$FAILURE_ALARM" ]; then
+    if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+      positive_recovery_reset
+      exit 0
+    fi
+    if autoarm_owns_recovery; then
+      budget_reset
+      exit 0
+    fi
+    if (set -C; : > "$FAILURE_ALARM") 2>/dev/null; then
+      if [ "$FM_SUP_IN_FLIGHT" -gt 0 ]; then
+        NEED_DESC="$FM_SUP_IN_FLIGHT task(s) in flight"
+      elif [ "$FM_SUP_SOURCES" -gt 0 ]; then
+        NEED_DESC="$FM_SUP_SOURCES process-event source(s) registered"
+      else
+        NEED_DESC="X-mode relay polling active"
+      fi
+      printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
+      exit 0
+    fi
+  fi
+fi
 block_stop

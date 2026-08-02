@@ -985,6 +985,18 @@ run_hook_claude() {
   printf '{"stop_hook_active":%s,"session_id":"sess-claude-mode"}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1
 }
 
+seed_claude_failure() {
+  local dir=$1 outcome=${2:-failed-suppressed}
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  printf 'epoch=3 owner_pid=999 outcome=%s updated_at=1\n' "$outcome" > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+}
+
+seed_claude_budget() {
+  local dir=$1 count=$2
+  printf 'session=sess-claude-mode\ncount=%s\n' "$count" > "$dir/state/.turnend-claude-blocks"
+}
+
 # The 2026-07-21 incident regression: after a spent forced continuation the old
 # one-shot loop guard ALLOWED a blind stop (stop_hook_active=true) while the
 # watcher was already dead. In --claude mode the guard must re-block instead.
@@ -1014,6 +1026,8 @@ test_hook_claude_mode_allows_when_autoarm_owner_alive() {
   local dir pid out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-owner")
   : > "$dir/state/task1.meta"
+  seed_claude_failure "$dir"
+  seed_claude_budget "$dir" 3
   sleep 60 &
   pid=$!
   mkdir -p "$dir/state/.claude-autoarm.lock"
@@ -1023,6 +1037,7 @@ test_hook_claude_mode_allows_when_autoarm_owner_alive() {
   wait "$pid" 2>/dev/null || true
   expect_code 0 "$status" "--claude mode must allow when the auto-arm owner process is alive"
   [ -z "$out" ] || fail "--claude owner-claimed allow produced output: $out"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "live automatic continuation emitted the attended fail-open alarm"
   pass "fm-turnend-guard --claude: allows the stop when the Stop auto-arm owner holds this home"
 }
 
@@ -1037,6 +1052,21 @@ test_hook_claude_mode_allows_on_fresh_rewake_epoch() {
   pass "fm-turnend-guard --claude: fresh rewake epoch prevents a duplicate continuation for the same event"
 }
 
+test_hook_claude_mode_allows_on_fresh_failed_epoch() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-failed-epoch")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  seed_claude_budget "$dir" 3
+  printf 'epoch=3 owner_pid=999 outcome=failed-suppressed updated_at=%s\n' "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  out=$(run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "a fresh failed epoch must count as its exit-2 automatic continuation"
+  [ -z "$out" ] || fail "fresh failed-epoch allow produced output: $out"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "fresh automatic continuation emitted the attended fail-open alarm"
+  assert_absent "$dir/state/.turnend-claude-blocks" "fresh automatic continuation did not reset the block budget"
+  pass "fm-turnend-guard --claude: fresh failure exit-2 prevents a duplicate guard continuation"
+}
+
 test_hook_claude_mode_stale_rewake_epoch_blocks() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-stale-epoch")
@@ -1048,23 +1078,69 @@ test_hook_claude_mode_stale_rewake_epoch_blocks() {
   pass "fm-turnend-guard --claude: stale rewake epoch does not allow a blind stop"
 }
 
-test_hook_claude_mode_block_budget_then_degraded_allow() {
+test_hook_claude_mode_budget_without_verified_failure_keeps_blocking() {
   local dir out status i
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-budget")
   : > "$dir/state/task1.meta"
-  for i in 1 2 3; do
+  for i in 1 2 3 4; do
     out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
     expect_code 2 "$status" "--claude block $i must exit 2 within the budget"
   done
+  assert_not_contains "$out" 'systemMessage' "budget exhaustion without verified auto-arm failure must not fail open"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "unverified budget exhaustion recorded an attended alarm"
+  pass "fm-turnend-guard --claude: budget exhaustion alone cannot permit a blind stop"
+}
+
+test_hook_claude_mode_verified_failure_alarm_is_loud_and_once() {
+  local dir out out2 status status2
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-verified-alarm")
+  : > "$dir/state/task1.meta"
+  seed_claude_failure "$dir"
+  seed_claude_budget "$dir" 3
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
-  expect_code 0 "$status" "--claude must allow degraded once the consecutive-block budget is exhausted"
-  assert_contains "$out" '"systemMessage"' "--claude degraded allow must surface a visible systemMessage"
-  assert_contains "$out" 'block budget exhausted' "--claude degraded allow must name the exhausted budget"
-  assert_not_contains "$out" 'fm-watch-arm.sh' "--claude degraded allow must not assign a manual background repair"
-  assert_contains "$out" 'automatic watcher mechanism is broken' "--claude degraded allow must route recovery through automatic-mechanism diagnosis"
-  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
-  expect_code 2 "$status" "--claude budget must reset after the degraded allow so the next chain re-engages"
-  pass "fm-turnend-guard --claude: re-block budget stays below the 8-block cap and resets after degraded allow"
+  expect_code 0 "$status" "verified failure with exhausted budget must take the bounded attended fail-open"
+  assert_contains "$out" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "bounded fail-open alarm was not unmistakable"
+  assert_contains "$out" 'Keep this session attended' "bounded fail-open alarm omitted the attended-session action"
+  assert_contains "$out" 'diagnose the automatic Stop-hook and watcher startup' "bounded fail-open alarm omitted automatic-mechanism diagnosis"
+  assert_not_contains "$out" 'fm-watch-arm.sh' "bounded fail-open alarm assigned a manual watcher launch"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "bounded fail-open did not consume the episode alarm"
+  out2=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status2=$?
+  expect_code 2 "$status2" "a consumed attended alarm must make later unhealthy stops block again"
+  assert_not_contains "$out2" 'FIRSTMATE SUPERVISION IS GENUINELY DOWN' "attended failure alarm repeated in one episode"
+  pass "fm-turnend-guard --claude: verified fail-open is loud, bounded, attended, and non-repeating"
+}
+
+test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch() {
+  local no_notice notice_only out status
+  no_notice=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-no-notice")
+  : > "$no_notice/state/task1.meta"
+  printf 'epoch=3 owner_pid=999 outcome=failed-suppressed updated_at=1\n' > "$no_notice/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$no_notice/state/.claude-autoarm-epoch"
+  seed_claude_budget "$no_notice" 3
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$no_notice" true); status=$?
+  expect_code 2 "$status" "an exhausted failure epoch without the consumed notice must remain blocking"
+
+  notice_only=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-no-epoch")
+  : > "$notice_only/state/task1.meta"
+  : > "$notice_only/state/.claude-autoarm-failure-notified"
+  seed_claude_budget "$notice_only" 3
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$notice_only" true); status=$?
+  expect_code 2 "$status" "a consumed notice without an exhausted failure epoch must remain blocking"
+  pass "fm-turnend-guard --claude: fail-open requires both exhausted retries and consumed notice"
+}
+
+test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-afk")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  seed_claude_failure "$dir"
+  seed_claude_budget "$dir" 3
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 2 "$status" "away mode must not use a stale Stop-autoarm failure to fail open"
+  assert_contains "$out" 'Away mode owns watcher supervision' "away-mode block lost its daemon ownership guidance"
+  assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "away mode consumed the Stop-autoarm attended alarm"
+  pass "fm-turnend-guard --claude: away ownership excludes the Stop-autoarm fail-open"
 }
 
 test_hook_claude_mode_allow_resets_budget() {
@@ -1074,6 +1150,8 @@ test_hook_claude_mode_allow_resets_budget() {
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
   expect_code 2 "$status" "first --claude block must exit 2"
   [ -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude block must record the consecutive-block budget"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
   sleep 60 &
   pid=$!
   identity=$(watcher_identity "$dir" "$pid") || {
@@ -1089,9 +1167,11 @@ test_hook_claude_mode_allow_resets_budget() {
   rm -rf "$dir/state/.watch.lock"
   expect_code 0 "$status" "--claude must allow once the watcher is healthy again"
   [ ! -f "$dir/state/.turnend-claude-blocks" ] || fail "--claude allow must reset the consecutive-block budget"
+  [ ! -f "$dir/state/.claude-autoarm-failure-notified" ] || fail "positive watcher recovery must reset the failure notice"
+  [ ! -f "$dir/state/.claude-autoarm-failure-alarmed" ] || fail "positive watcher recovery must reset the attended alarm"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
   expect_code 2 "$status" "a later unhealthy chain must re-block from a fresh budget"
-  pass "fm-turnend-guard --claude: any allow resets the consecutive-block budget"
+  pass "fm-turnend-guard --claude: positive watcher recovery resets failure episode state"
 }
 
 test_hook_claude_mode_waits_for_late_claim() {
@@ -1183,8 +1263,12 @@ test_hook_claude_mode_reblocks_stop_hook_active_when_unhealthy
 test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive
 test_hook_claude_mode_allows_on_fresh_rewake_epoch
+test_hook_claude_mode_allows_on_fresh_failed_epoch
 test_hook_claude_mode_stale_rewake_epoch_blocks
-test_hook_claude_mode_block_budget_then_degraded_allow
+test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
+test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
+test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
+test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary

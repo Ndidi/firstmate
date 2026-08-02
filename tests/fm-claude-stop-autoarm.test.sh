@@ -248,10 +248,14 @@ test_inert_when_afk() {
   dir=$(make_primary_dir "$TMP_ROOT/afk")
   : > "$dir/state/task.meta"
   : > "$dir/state/.afk"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
   write_arm_fixture "$dir" actionable
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   expect_code 0 "$status" "hook must never arm or rewake while away mode owns triage"
   [ ! -e "$dir/state/arm-ran" ] || fail "hook armed while state/.afk existed"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "AFK without positive recovery reset the failure notice"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "AFK without positive recovery reset the attended alarm"
   pass "auto-arm: inert while AFK owns supervision"
 }
 
@@ -311,10 +315,14 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain() {
 test_inert_when_fleet_idle() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/idle")
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
   write_arm_fixture "$dir" actionable
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   expect_code 0 "$status" "hook must exit 0 in an idle home with no X-mode poll"
   [ ! -e "$dir/state/arm-ran" ] || fail "hook armed an idle home"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "idle state without positive recovery reset the failure notice"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" "idle state without positive recovery reset the attended alarm"
   pass "auto-arm: inert with nothing in flight and no X-mode need"
 }
 
@@ -388,9 +396,11 @@ test_actionable_recovery_starts_new_failure_episode() {
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" failed
   out1=$(run_autoarm "$dir" 2>/dev/null); status1=$?
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
   write_arm_fixture "$dir" actionable
   out2=$(run_autoarm "$dir" 2>/dev/null); status2=$?
   [ ! -e "$dir/state/.claude-autoarm-failure-notified" ] || fail "actionable recovery did not clear the failure episode marker"
+  [ ! -e "$dir/state/.claude-autoarm-failure-alarmed" ] || fail "actionable recovery did not clear the attended alarm marker"
   write_arm_fixture "$dir" failed
   out3=$(run_autoarm "$dir" 2>/dev/null); status3=$?
   expect_code 2 "$status1" "the first failure episode must notify"
@@ -412,6 +422,8 @@ test_benign_cycle_end_with_live_watcher_is_silent() {
   identity=$(watcher_identity "$dir" "$pid") || fail "could not identify live watcher holder for benign close"
   record_watcher_lock "$dir" "$pid" "$identity"
   touch "$dir/state/.last-watcher-beat"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  : > "$dir/state/.claude-autoarm-failure-alarmed"
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
   out2=$(run_autoarm "$dir" 2>/dev/null); status2=$?
   kill "$pid" 2>/dev/null || true
@@ -423,6 +435,7 @@ test_benign_cycle_end_with_live_watcher_is_silent() {
   [ "$(epoch_outcome "$dir")" = clean ] || fail "benign live cycle must record outcome=clean, got: $(epoch_outcome "$dir")"
   [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 2 ] || fail "the next Stop-owned cycle must run its own bounded arm"
   [ ! -e "$dir/state/.claude-autoarm-failure-notified" ] || fail "benign live cycle must not leave a failure-notice marker"
+  [ ! -e "$dir/state/.claude-autoarm-failure-alarmed" ] || fail "benign live cycle must not leave an attended-alarm marker"
   pass "auto-arm: benign cycle end with a live watcher and fresh beacon stays silent across the next cycle"
 }
 
