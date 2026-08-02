@@ -36,14 +36,16 @@
 #     fresh watcher predicate and retried a bounded number of times in this
 #     hook. Only an exhausted failure with no verified watcher emits one
 #     last-resort notice per failure episode; later consecutive failures still
-#     exit 2 to guarantee the next Stop-owned retry without repeating notice.
+#     exit 2 to guarantee the next Stop-owned retry without repeating notice,
+#     until the synchronous guard has consumed its attended fail-open.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim and
 # outcome so the synchronous Stop guard (bin/fm-turnend-guard.sh --claude) can
 # allow a stop whose recovery this hook already owns, instead of forcing a
 # duplicate continuation for the same event epoch. The failure marker
 # state/.claude-autoarm-failure-notified deduplicates the last-resort notice,
-# and state/.claude-autoarm-failure-alarmed bounds the attended fail-open.
+# and state/.claude-autoarm-failure-alarmed bounds the attended fail-open and
+# suppresses any later automatic continuation in that unresolved episode.
 #
 # This hook never blocks the Stop decision itself and never prints to stdout:
 # exit 0 is always silent, and exit 2 carries the rewake banner on stderr.
@@ -219,9 +221,17 @@ if [ "$ACTIONABLE" -eq 1 ]; then
 fi
 
 # The arm exhausted its bounded attempts and the positive live-watcher check
-# still failed. Notify only once for this continuous failure episode; every
-# later invocation still exits 2 so Claude must continue into another Stop-owned
-# retry without creating a repeated operator notice or manual-arm loop.
+# still failed. After the synchronous guard has consumed the episode's attended
+# fail-open, do not create another exit-2 continuation that could defeat it.
+if [ -e "$FAILURE_ALARM" ]; then
+  write_epoch failed-suppressed
+  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+  exit 0
+fi
+
+# Notify only once for this continuous failure episode; every later invocation
+# still exits 2 so Claude must continue into another Stop-owned retry without
+# creating a repeated operator notice or manual-arm loop.
 if [ ! -e "$FAILURE_NOTICE" ]; then
   write_epoch failed
   {
