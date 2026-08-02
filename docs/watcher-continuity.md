@@ -15,12 +15,8 @@ A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predic
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
 After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon before retrying a bounded number of times.
 A cycle-end failure is benign when that live-watcher predicate is true, and the hook suppresses the arm output and continues silently.
-Only an exhausted failure with no verified watcher emits one last-resort notice for the continuous failure episode; later consecutive Stop cycles exit 2 to guarantee another Stop-owned retry without repeating the notice.
-The Claude turn-end guard treats the first fresh exhausted-failure epoch as the current automatic handoff, then advances the bounded block budget for later fresh failed epochs instead of resetting it.
-An active arming epoch advances that same budget at most once, and the terminal check holds the existing auto-arm owner boundary while rechecking watcher health, episode identity, and budget exhaustion.
-If the automatic mechanism later remains broken, the guard permits one loud attended fail-open only after the verified failure notice and block budget are both exhausted and a final check finds no watcher or continuation.
-After that alarm, the auto-arm suppresses further exit-2 continuations until positive watcher recovery, so the bounded fail-open cannot be trapped in a retry loop.
-That alarm cannot repeat until positive watcher recovery clears the failure episode.
+Only an exhausted failure with no verified watcher emits one last-resort notice for the continuous failure episode; later consecutive Stop cycles exit 2 to guarantee another Stop-owned retry without repeating the notice until the turn-end guard consumes the attended fail-open.
+The Claude turn-end guard owns the monotonic failure progression, one-time attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
 While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
 
 ## Actionable wake ordering
