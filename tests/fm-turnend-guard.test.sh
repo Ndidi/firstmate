@@ -1060,6 +1060,8 @@ test_hook_claude_mode_block_budget_then_degraded_allow() {
   expect_code 0 "$status" "--claude must allow degraded once the consecutive-block budget is exhausted"
   assert_contains "$out" '"systemMessage"' "--claude degraded allow must surface a visible systemMessage"
   assert_contains "$out" 'block budget exhausted' "--claude degraded allow must name the exhausted budget"
+  assert_not_contains "$out" 'fm-watch-arm.sh' "--claude degraded allow must not assign a manual background repair"
+  assert_contains "$out" 'automatic watcher mechanism is broken' "--claude degraded allow must route recovery through automatic-mechanism diagnosis"
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" false); status=$?
   expect_code 2 "$status" "--claude budget must reset after the degraded allow so the next chain re-engages"
   pass "fm-turnend-guard --claude: re-block budget stays below the 8-block cap and resets after degraded allow"

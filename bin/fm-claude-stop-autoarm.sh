@@ -35,8 +35,8 @@
 #   - Failure handling: a typed failure is rechecked against the same live,
 #     fresh watcher predicate and retried a bounded number of times in this
 #     hook. Only an exhausted failure with no verified watcher emits one
-#     last-resort notice per failure episode; later consecutive failures stay
-#     silent for the next Stop-owned retry.
+#     last-resort notice per failure episode; later consecutive failures still
+#     exit 2 to guarantee the next Stop-owned retry without repeating notice.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim and
 # outcome so the synchronous Stop guard (bin/fm-turnend-guard.sh --claude) can
@@ -148,24 +148,20 @@ write_epoch arming
 # NO shell &: this hook process tree is the harness-owned lifecycle. The arm
 # forks the watcher as its own tracked child exactly as it does for the
 # model-driven background-task path, and propagates the wake reason on close.
-# A failed-looking close is checked against the same identity-matched live
+# Every non-actionable close is checked against the same identity-matched live
 # watcher and fresh-beacon predicate used by the turn-end guard before it is
 # retried or translated into an operator-visible failure.
 OUT=
-RC=0
 ACTIONABLE=0
-FAILED=0
 HEALTHY=0
 attempt=0
 while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   attempt=$((attempt + 1))
   OUT=$(mktemp "$STATE/.claude-autoarm-output.XXXXXX") || OUT=
   if [ -n "$OUT" ]; then
-    "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1
-    RC=$?
+    "$SCRIPT_DIR/fm-watch-arm.sh" >"$OUT" 2>&1 || true
   else
-    "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1
-    RC=$?
+    "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || true
   fi
 
   # AFK may have appeared mid-cycle: the daemon owns triage now, so suppress
@@ -178,21 +174,17 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
   fi
 
   ACTIONABLE=0
-  FAILED=0
   if [ -n "$OUT" ]; then
     grep -Eq '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" 2>/dev/null && ACTIONABLE=1
-    grep -q '^watcher: FAILED' "$OUT" 2>/dev/null && FAILED=1
   fi
-  [ "$RC" -ne 0 ] && FAILED=1
 
-  # A close that looks failed is benign when another verified watcher already
-  # owns this home and is still beating within the shared grace window.
+  # A non-actionable close is benign when another verified watcher already owns
+  # this home and is still beating within the shared grace window.
   if fm_watcher_healthy "$STATE" "$SCRIPT_DIR/fm-watch.sh" "$GRACE" "$FM_HOME"; then
     HEALTHY=1
     break
   fi
   [ "$ACTIONABLE" -eq 1 ] && break
-  [ "$FAILED" -eq 1 ] || break
   [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ] || break
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   OUT=
@@ -214,13 +206,8 @@ if [ "$HEALTHY" -eq 1 ]; then
   exit 0
 fi
 
-if [ "$ACTIONABLE" -eq 0 ] && [ "$FAILED" -eq 0 ]; then
-  write_epoch clean
-  [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-  exit 0
-fi
-
 if [ "$ACTIONABLE" -eq 1 ]; then
+  rm -f "$FAILURE_NOTICE" 2>/dev/null || true
   write_epoch rewake
   {
     printf 'firstmate watcher wake - one supervision event needs a handling turn now.\n'
@@ -232,8 +219,9 @@ if [ "$ACTIONABLE" -eq 1 ]; then
 fi
 
 # The arm exhausted its bounded attempts and the positive live-watcher check
-# still failed. Notify only once for this continuous failure episode; the next
-# Stop-owned invocation retries silently instead of creating a manual-arm loop.
+# still failed. Notify only once for this continuous failure episode; every
+# later invocation still exits 2 so Claude must continue into another Stop-owned
+# retry without creating a repeated operator notice or manual-arm loop.
 if [ ! -e "$FAILURE_NOTICE" ]; then
   : > "$FAILURE_NOTICE" 2>/dev/null || true
   write_epoch failed
@@ -247,4 +235,4 @@ if [ ! -e "$FAILURE_NOTICE" ]; then
 fi
 write_epoch failed-suppressed
 [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-exit 0
+exit 2

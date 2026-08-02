@@ -352,7 +352,7 @@ test_failed_close_rewakes_with_failure_banner() {
   pass "auto-arm: bounded failure verification emits one automatic-mechanism alarm"
 }
 
-test_failed_cycles_notify_only_once() {
+test_failed_cycles_notify_once_and_keep_retrying() {
   local dir out1 out2 status1 status2
   dir=$(make_primary_dir "$TMP_ROOT/failed-dedup")
   : > "$dir/state/task.meta"
@@ -360,25 +360,46 @@ test_failed_cycles_notify_only_once() {
   out1=$(run_autoarm "$dir" 2>/dev/null); status1=$?
   out2=$(run_autoarm "$dir" 2>/dev/null); status2=$?
   expect_code 2 "$status1" "the first exhausted failure must notify"
-  expect_code 0 "$status2" "a consecutive exhausted failure must remain silent"
+  expect_code 2 "$status2" "a consecutive exhausted failure must force another Stop-owned retry"
   [ -n "$out1" ] || fail "the first exhausted failure did not notify"
   [ -z "$out2" ] || fail "consecutive exhausted failure repeated an operator notice: $out2"
   [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 4 ] || fail "each cycle must retain bounded automatic retries"
   assert_present "$dir/state/.claude-autoarm-failure-notified" "failure episode marker was not recorded"
   [ "$(epoch_outcome "$dir")" = failed-suppressed ] || fail "second failure must record failed-suppressed"
-  pass "auto-arm: consecutive failed cycles cannot repeat an operator-repair prompt"
+  pass "auto-arm: consecutive failures keep Stop-owned retry without repeating notice"
 }
 
-test_clean_close_exits_silently() {
+test_unverified_clean_close_exhausts_retries() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/clean")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" clean
   out=$(run_autoarm "$dir" 2>/dev/null); status=$?
-  expect_code 0 "$status" "a clean arm close with no actionable reason must not rewake"
-  [ -z "$out" ] || fail "clean close produced output: $out"
-  [ "$(epoch_outcome "$dir")" = clean ] || fail "epoch must record outcome=clean, got: $(epoch_outcome "$dir")"
-  pass "auto-arm: clean close exits silently with a clean epoch"
+  expect_code 2 "$status" "a non-actionable close without a healthy watcher must fail closed"
+  assert_contains "$out" "automatic supervision mechanism is broken" "unverified close must report automatic failure"
+  [ "$(wc -l < "$dir/state/arm-ran" | tr -d ' ')" -eq 2 ] || fail "unverified close must exhaust exactly two bounded attempts"
+  [ "$(epoch_outcome "$dir")" = failed ] || fail "epoch must record outcome=failed, got: $(epoch_outcome "$dir")"
+  pass "auto-arm: unverified clean close exhausts retries and fails closed"
+}
+
+test_actionable_recovery_starts_new_failure_episode() {
+  local dir out1 out2 out3 status1 status2 status3
+  dir=$(make_primary_dir "$TMP_ROOT/failure-episode-reset")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" failed
+  out1=$(run_autoarm "$dir" 2>/dev/null); status1=$?
+  write_arm_fixture "$dir" actionable
+  out2=$(run_autoarm "$dir" 2>/dev/null); status2=$?
+  [ ! -e "$dir/state/.claude-autoarm-failure-notified" ] || fail "actionable recovery did not clear the failure episode marker"
+  write_arm_fixture "$dir" failed
+  out3=$(run_autoarm "$dir" 2>/dev/null); status3=$?
+  expect_code 2 "$status1" "the first failure episode must notify"
+  expect_code 2 "$status2" "actionable recovery must rewake"
+  expect_code 2 "$status3" "a later independent failure episode must notify"
+  assert_contains "$out1" "automatic supervision mechanism is broken" "first failure episode notice missing"
+  assert_contains "$out2" "firstmate watcher wake" "actionable recovery rewake missing"
+  assert_contains "$out3" "automatic supervision mechanism is broken" "later failure episode notice was suppressed"
+  pass "auto-arm: actionable recovery resets failure-notice deduplication"
 }
 
 test_benign_cycle_end_with_live_watcher_is_silent() {
@@ -492,8 +513,9 @@ test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason
 test_failed_close_rewakes_with_failure_banner
-test_failed_cycles_notify_only_once
-test_clean_close_exits_silently
+test_failed_cycles_notify_once_and_keep_retrying
+test_unverified_clean_close_exhausts_retries
+test_actionable_recovery_starts_new_failure_episode
 test_benign_cycle_end_with_live_watcher_is_silent
 test_arms_for_x_mode_poll_need_without_inflight
 test_single_flight_admits_exactly_one_owner
