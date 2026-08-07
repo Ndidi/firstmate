@@ -725,6 +725,23 @@ else
   printf 'absent\n'
 fi
 
+# Work the captain has been given no name for. The turn-end guard raises each
+# one once, so a receipt that outlived that block - because the session ended,
+# compacted, or restarted - would otherwise be silently unpaid forever. Read
+# from disk here for the same reason public commitments are.
+# bin/fm-capture-receipt.sh owns the ledger; a home with nothing owed prints no
+# subsection and never reaches the second call.
+if [ -x "$SCRIPT_DIR/fm-capture-receipt.sh" ] \
+  && "$SCRIPT_DIR/fm-capture-receipt.sh" active 2>/dev/null; then
+  CAPTURE_RECEIPTS=$("$SCRIPT_DIR/fm-capture-receipt.sh" pending 2>/dev/null) || CAPTURE_RECEIPTS=
+  if [ -n "$CAPTURE_RECEIPTS" ]; then
+    subsection "Captain receipts owed"
+    printf '%s\n' "$CAPTURE_RECEIPTS"
+    printf '\nEach is filed work the captain cannot name yet. Send its sentence in your next\n'
+    printf 'reply, then attest with %s/bin/fm-capture-receipt.sh delivered <identity>.\n' "$FM_ROOT"
+  fi
+fi
+
 # Public commitments made through the myfirstmate relay. A promise to reply in a
 # public thread must survive compaction and restart, so it is surfaced from disk
 # here rather than from conversation memory. fm-public-followup-lib.sh owns both

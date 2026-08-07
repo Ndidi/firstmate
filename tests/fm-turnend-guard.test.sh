@@ -115,9 +115,26 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
+  cp "$ROOT/bin/fm-capture-receipt.sh" "$dir/bin/fm-capture-receipt.sh"
   mkdir -p "$dir/docs"
   cp -R "$ROOT/docs/supervision-protocols" "$dir/docs/supervision-protocols"
-  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh"
+  chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-operational-input.sh" "$dir/bin/fm-supervision-instructions.sh" "$dir/bin/fm-harness.sh" "$dir/bin/fm-capture-receipt.sh"
+}
+
+# Give a fixture home a backlog whose items are already adopted, so only what a
+# test files afterwards can owe a receipt. Every fixture WITHOUT this call has no
+# data/backlog.md at all, which is why the capture-receipt check stays inert
+# across the whole supervision suite.
+seed_adopted_backlog() {  # <dir>
+  local dir=$1
+  mkdir -p "$dir/data"
+  printf '# Backlog\n\n## Queued\n- [ ] already-known - Filed long before this turn\n' \
+    > "$dir/data/backlog.md"
+  FM_HOME="$dir" bash "$dir/bin/fm-capture-receipt.sh" reconcile
+}
+
+file_backlog_item() {  # <dir> <identity> <title>
+  printf -- '- [ ] %s - %s\n' "$2" "$3" >> "$1/data/backlog.md"
 }
 
 mark_codex_hook_root() {
@@ -360,6 +377,76 @@ test_hook_blocks_when_unhealthy_in_primary() {
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
   pass "fm-turnend-guard: blocks with the exact required reason in the primary when unhealthy"
+}
+
+# --- second block reason: unpaid captain capture receipts -------------------
+# The ledger's own behavior is owned by tests/fm-capture-receipt.test.sh; these
+# cover only what the hook adds - that the check reaches the same scoped primary
+# the supervision predicate does, and that neither reason weakens the other.
+
+test_hook_blocks_on_unpaid_capture_receipt() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-receipt")
+  seed_adopted_backlog "$dir"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "an adopted backlog with no supervision need must not block"
+
+  file_backlog_item "$dir" apex-loading-copy 'The shop front should say it is opening'
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must block when filed work has no captain receipt"
+  assert_contains "$out" "THE CAPTAIN HAS NOT BEEN TOLD WHAT THIS WAS FILED AS" \
+    "receipt block banner must read as its own alarm"
+  # shellcheck disable=SC2016 # Backticks are literal expected output.
+  assert_contains "$out" 'Filed as `apex-loading-copy`' \
+    "the block must hand over the captain-facing sentence"
+  assert_not_contains "$out" "TURN WOULD END BLIND" \
+    "a receipt block must not masquerade as a supervision block"
+
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "the same receipt must never block a second turn end"
+  pass "fm-turnend-guard: blocks once on an unpaid capture receipt, in a healthy primary"
+}
+
+test_hook_receipt_block_does_not_displace_supervision() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-receipt-and-supervision")
+  seed_adopted_backlog "$dir"
+  : > "$dir/state/task1.meta"
+  file_backlog_item "$dir" apex-loading-copy 'The shop front should say it is opening'
+
+  # Both reasons are live. The receipt block comes first and forces a
+  # continuation; supervision is not skipped, only deferred to that turn's end.
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "the receipt must block while it is still unsurfaced"
+  assert_contains "$out" "THE CAPTAIN HAS NOT BEEN TOLD WHAT THIS WAS FILED AS" \
+    "the receipt is the first of the two reasons to fire"
+
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "supervision must still block once the receipt has been surfaced"
+  assert_contains "$out" "TURN WOULD END BLIND" "the supervision alarm must follow, not be lost"
+  assert_contains "$out" "$REQUIRED_REASON" "supervision's exact required instruction must survive"
+  pass "fm-turnend-guard: a receipt block defers the supervision block, never replaces it"
+}
+
+test_hook_never_owes_captain_receipts_in_secondmate_home() {
+  local dir out status
+  dir=$(make_secondmate_dir "$TMP_ROOT/hook-receipt-secondmate")
+  seed_adopted_backlog "$dir"
+  file_backlog_item "$dir" handed-off-item 'Routed in from the main home'
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "a secondmate home must not block on a captain receipt"
+  [ -z "$out" ] || fail "secondmate receipt check must be silent, got:"$'\n'"$out"
+  pass "fm-turnend-guard: a secondmate never owes the captain a receipt (hard rule 4)"
+}
+
+test_hook_capture_receipt_inert_without_a_backlog() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-receipt-no-backlog")
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 0 "$status" "a primary with no backlog must not block"
+  assert_absent "$dir/state/capture-receipts" \
+    "no ledger may be created in a home that has no backlog"
+  pass "fm-turnend-guard: the receipt check creates nothing in a home with no backlog"
 }
 
 test_hook_blocks_from_fm_home_state() {
@@ -1556,6 +1643,10 @@ test_hook_x_mode_only_blocks_in_default_mode
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override
 test_hook_loop_guard_allows_retry
+test_hook_blocks_on_unpaid_capture_receipt
+test_hook_receipt_block_does_not_displace_supervision
+test_hook_never_owes_captain_receipts_in_secondmate_home
+test_hook_capture_receipt_inert_without_a_backlog
 test_hook_blocks_in_secondmate_own_home
 test_hook_silent_in_idle_secondmate_home
 test_hook_secondmate_loop_guard_allows_retry

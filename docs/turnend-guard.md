@@ -41,6 +41,20 @@ Its banner names the true failing condition, either a missing live watcher proce
 `FM_GUARD_GRACE` controls beacon freshness and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard exits 0 because it cannot safely read loop-guard fields.
 
+## Second block reason: an unpaid captain capture receipt
+
+The hook has two independent reasons to block, and this doc owns only their boundary.
+Supervision is the first; the second is filed work the captain has not been given a name for, whose contract is `AGENTS.md` section 9 and whose mechanics are owned by `bin/fm-capture-receipt.sh`.
+Placing it in this script rather than in each harness integration is deliberate: every enabled primary already routes its turn end here, so one call reaches all of them and no adapter changes.
+
+The receipt check runs immediately after the shared primary scope and before the supervision predicate, which leaves every exit path of the Claude block-budget accounting untouched.
+It is skipped in a genuine secondmate home, which never addresses the captain and whose backlog receives handed-off items it must not receipt.
+A checkout without the script has no second block reason at all, so an older home degrades to supervision-only behavior.
+
+Ordering costs supervision nothing.
+A receipt block forces a model continuation whose own turn end re-runs this script, and under Claude the Stop-owned auto-arm fires on the same event regardless of what this hook returns, so recovery is never deferred by it.
+The receipt check is bounded independently of every harness loop-guard field: it blocks at most once per identity for the life of the home, recorded in the owed record itself, and a receipt it cannot mark allows the turn end rather than repeating.
+
 ## Harness integrations
 
 - Claude registers two `Stop` hooks in `.claude/settings.json`, both anchored through `CLAUDE_PROJECT_DIR`: `bin/fm-turnend-guard.sh --claude`, and `bin/fm-claude-stop-autoarm.sh` with `asyncRewake: true` and `timeout: 28800`.

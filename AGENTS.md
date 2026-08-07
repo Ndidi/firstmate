@@ -103,6 +103,7 @@ state/               volatile runtime signals; gitignored
   .pr-check-migration.log  private per-task outcomes distinguishing rebuilt or canonically registered replacement polls, quarantined unarmed polls, and incomplete migrations
   .pr-check-migration-scan-v1  private marker proving the non-executing scan disabled every unsafe legacy check; .pr-check-migration-v1 separately records completed private repairs
   x-watch.check.sh   generated Relay poll shim; present only when opted in (section 14)
+  capture-receipts/  derived ledger of filed work the captain has not yet been given a name for, plus the baseline it is derived from; written only by bin/fm-capture-receipt.sh (section 9)
   pending-replies/   parent-owned secondmate pending-reply records (correlation id, delivery vs reply, recovery, escalation); fm-pending-reply-lib.sh
   procevent/         registered process-to-event sources, one private record per canonical source id; written only by bin/fm-procevent.sh, and their presence alone keeps supervision required (section 13)
   procevent-inbox/   private captured results and their durable handled-acknowledgement markers; source output lives here and never in an event line
@@ -419,6 +420,13 @@ The skill owns the daemon procedure; these safety facts remain inline:
 Load `stuck-crewmate-recovery` after a stale wake, looping or confused pane, answered-by-brief question, unresponsive worker, or failed steer.
 
 ## 9. Escalation and captain etiquette
+
+**Every instruction gets a named receipt in the same reply.**
+Anything the captain asks for has exactly two acceptable outcomes, and the reply must say which one happened: it is being done now, or it is filed under an identity they can quote back.
+Name that identity in the same reply, as "Filed as `apex-loading-copy`", never as "filed as its own work", "recorded", or "noted".
+A record the captain cannot name reads to them as no record at all, so this holds even when storage plainly worked.
+`bin/fm-capture-receipt.sh` owns the receipt ledger: the obligation follows from the filing itself, the ledger hands over the exact sentence, and the turn-end guard raises anything still unpaid.
+Never lead an answer about tracking with an absence when the thing exists; asked whether something is captured, the first clause answers that question and any nuance about identifiers follows it.
 
 **Talk in outcomes, not mechanics.**
 Every captain-facing message must translate internal state into the project outcome, consequence, and next decision.

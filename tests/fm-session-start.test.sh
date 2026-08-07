@@ -713,6 +713,41 @@ EOF
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
 }
 
+# --- captain receipts owed ---------------------------------------------------
+# The turn-end guard surfaces each unpaid receipt exactly once, so a receipt that
+# outlived that block - the session ended, compacted, or restarted - has only the
+# digest left to raise it. bin/fm-capture-receipt.sh owns the ledger itself;
+# this covers the digest's gate and its rendering.
+
+test_captain_receipts_owed_subsection() {
+  local rec root home fakebin out
+  rec=$(new_world captain-receipts)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+
+  printf '# Backlog\n\n## Queued\n- [ ] already-known - Filed long ago\n' > "$home/data/backlog.md"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "Captain receipts owed" \
+    "an adopted backlog owes nothing, so the subsection must not render"
+
+  printf -- '- [ ] apex-loading-copy - The shop front should say it is opening\n' \
+    >> "$home/data/backlog.md"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "Captain receipts owed" \
+    "an unpaid receipt must surface in the digest"
+  # shellcheck disable=SC2016 # Backticks are literal expected output.
+  assert_contains "$out" 'Filed as `apex-loading-copy`' \
+    "the digest must carry the sentence, not just the identity"
+  assert_contains "$out" "fm-capture-receipt.sh delivered" \
+    "the digest must name how to clear the debt"
+
+  pass "session start: unpaid captain receipts surface, an adopted backlog stays silent"
+}
+
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
@@ -2181,6 +2216,7 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_captain_receipts_owed_subsection
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock

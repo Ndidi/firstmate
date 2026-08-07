@@ -124,6 +124,27 @@ fi
 # so this exempts them while guarding every real secondmate home.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+# --- second block reason: an unpaid captain capture receipt -------------------
+# Independent of everything below it. Work filed this turn that the captain
+# cannot name reads to them as nothing captured, so the turn boundary is the
+# last honest moment to hand over the identity (AGENTS.md section 9;
+# bin/fm-capture-receipt.sh owns the ledger and its once-per-item bound).
+# Deliberately BEFORE the supervision predicate so it needs no edit to any of
+# that path's exit points, which the Claude block-budget accounting depends on.
+# It costs supervision nothing: the receipt block forces a model continuation
+# whose own turn end re-runs this script, and under Claude the Stop-owned
+# auto-arm fires on the same event regardless of what this hook returns.
+# Skipped in a secondmate home, which never addresses the captain (hard rule 4)
+# and whose backlog receives handed-off items it must not receipt. An older home
+# without the script simply has no second block reason.
+if [ -x "$SCRIPT_DIR/fm-capture-receipt.sh" ] && ! fm_root_is_secondmate_home "$FM_ROOT"; then
+  RECEIPT_STATUS=0
+  "$SCRIPT_DIR/fm-capture-receipt.sh" guard || RECEIPT_STATUS=$?
+  if [ "$RECEIPT_STATUS" -eq 2 ]; then
+    exit 2
+  fi
+fi
+
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
