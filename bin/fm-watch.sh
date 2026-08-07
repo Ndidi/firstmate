@@ -40,6 +40,10 @@
 #                          count, and demand-deep-inspection marker, for human
 #                          inspection only - never an automatic interrupt,
 #                          signal, or restart of the worker or its tool process.
+#                          A busy pane past that bound whose worker DECLARED an
+#                          external wait takes the bounded pause cadence instead
+#                          of that wedge timer (busy_over_age_check), since a
+#                          declared pause is otherwise unreachable while busy.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -150,6 +154,9 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # an automatic interrupt, signal, or restart. A completed turn touches
 # turn-ended and resets the age. Set generously above any legitimate interval
 # between completed turns, including long tool calls, builds, or test runs.
+# A worker that DECLARED an external wait takes the bounded pause cadence at that
+# point instead of the wedge timer - see busy_over_age_check, which is also the
+# owner of why the declared pause cannot be read through pause_state_class here.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
@@ -312,6 +319,36 @@ busy_turn_over_age() {  # <task>
   f="$STATE/$task.turn-ended"
   [ -e "$f" ] || f="$STATE/$task.meta"
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
+}
+
+# busy_over_age_check: route a busy pane whose task has crossed the completed-turn
+# bound. A worker that DECLARED a bounded external wait (paused:) is absorbed on the
+# same long PAUSE_RESURFACE_SECS cadence a non-busy stale pane already gets, instead
+# of a wedge escalation every STALE_ESCALATE_SECS. Returns 0 when it absorbed the
+# pane on that pause cadence, 1 when it left the wedge timer in charge.
+#
+# A declared pause is otherwise unreachable on this path, because it is masked at two
+# independent layers: every sibling pause branch in this loop is gated on a NON-busy
+# pane, and fm-crew-state.sh reads the busy verdict BEFORE its status-log fallback, so
+# a busy worker's authoritative state is `working` and pause_state_class can never
+# answer `paused` for it. That is why a legitimately long bounded command - a full
+# suite, a render sweep, a polled lane - kept wedge-escalating no matter what its
+# worker declared. The pause is therefore read straight from the status log here
+# rather than through pause_state_class, whose liveness reconciliation (agent not
+# dead) a busy verdict already outranks.
+#
+# The duration bound BUSY_TURN_MAX_SECS exists to enforce is preserved, not removed:
+# handle_paused_stale still re-surfaces the pane every PAUSE_RESURFACE_SECS, so a
+# forgotten or dishonest pause is rechecked on a long cadence rather than never. Under
+# afk the daemon owns triage, so nothing is absorbed here and the wedge timer stands.
+busy_over_age_check() {  # <window> <task> <hash> <since-file> <escalation-count-file>
+  local w=$1 task=$2 h=$3 since_file=$4 escalation_file=$5
+  if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")"; then
+    handle_paused_stale "$w" "$task" "$h"
+    return 0
+  fi
+  wedge_timer_check "$w" "$since_file" "busy (no completed turn)" "$escalation_file"
+  return 1
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -1057,32 +1094,41 @@ EOF
       else
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping,
         # unless a genuinely busy pane has gone too long with no completed turn -
-        # then route it through the same wedge timer instead of erasing it.
+        # then route it through the same wedge timer instead of erasing it, or onto
+        # the declared-pause cadence when its worker declared an external wait.
+        paused_absorbed=1
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+          busy_over_age_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_absorbed=0
         else
           rm -f "$ssf" "$ewf"
         fi
-        if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
+        # Never clear the pause bookkeeping just written by an absorb above, or the
+        # re-surface throttle would be gone and the pause cadence would fire every poll.
+        if [ "$paused_absorbed" -ne 0 ] && [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
           clear_pause_tracking "$w"
         fi
       fi
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
+      task=$(window_to_task "$w" "$STATE")
+      paused_absorbed=1
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+        busy_over_age_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_absorbed=0
       else
         rm -f "$ssf" "$ewf"
       fi
-      task=$(window_to_task "$w" "$STATE")
-      if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
-        case "$(pause_state_class "$w" "$task")" in
-          paused) handle_paused_stale "$w" "$task" "$h" ;;
-          *)      clear_pause_tracking "$w" ;;
-        esac
-      else
-        [ -e "$pf" ] && clear_pause_tracking "$w"
+      # Skipped entirely when the absorb above already placed this pane on the pause
+      # cadence: re-running the non-busy pause reconciliation would clear that state.
+      if [ "$paused_absorbed" -ne 0 ]; then
+        if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
+          case "$(pause_state_class "$w" "$task")" in
+            paused) handle_paused_stale "$w" "$task" "$h" ;;
+            *)      clear_pause_tracking "$w" ;;
+          esac
+        else
+          [ -e "$pf" ] && clear_pause_tracking "$w"
+        fi
       fi
     fi
   done < <(recorded_windows)
