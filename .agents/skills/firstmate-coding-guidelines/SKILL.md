@@ -121,6 +121,10 @@ Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup rou
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - Tests must exercise behavior through an executable or public interface and must never assert implementation-source bytes, including through parsers, regexes, snapshots, or indirect wrappers.
+- A test must own every precondition it depends on rather than borrow one from the host, because a borrowed precondition makes the result a report about the machine.
+  A case that needs a tool absent forces it absent with `fm_fake_absent_env`, since no fakebin entry can express absence and hosts do ship gated names - `/usr/bin/orca` is the GNOME screen reader.
+  A case that needs a real host tool under a fixture path uses `fm_fake_passthrough`, because a packaged CLI resolves its own package relative to `$0` and a symlink breaks it.
+  A case that waits on concurrent work waits on the settled result, and where only a wall-clock bound is possible sets it far above real startup - the arm plugins spawn through `bash -lc`, and a login shell alone costs hundreds of milliseconds.
 - A maintainer-verification record under `docs/verification/` records active empirical facts, not assumptions or task chronology.
 - Include the date, version, exact commands run, and exact output needed to support the current guarantee.
 - Keep incident chronology and delivery evidence in private task reports or PR evidence unless a concise rationale is required to maintain a current safety boundary.

@@ -7,6 +7,19 @@ set -u
 
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+# The atomic receipt runs `tasks-axi mv` for real, so an installed-but-too-old
+# tasks-axi cannot satisfy this suite. Gate on the same verdict the receive step
+# applies, so an unsupported host skips honestly instead of reporting a handoff
+# failure that is really a version floor.
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$ROOT/bin/fm-tasks-axi-lib.sh"
+fm_tasks_axi_compatible || { echo "skip: tasks-axi is older than the supported floor"; exit 0; }
+# Iterations of a 0.02s poll each background step gets to reach its marker before
+# the case gives up. These bounds only decide how long a genuine hang takes to
+# report, so they are set well above any real startup: the steps they wait on
+# fork bash, node, and tasks-axi, and a five-second bound turns an oversubscribed
+# host into a spurious failure that reads exactly like a stuck handoff.
+MARKER_WAIT_LIMIT=1500
 TMP_ROOT=$(fm_test_tmproot fm-remote-handoff)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
@@ -23,8 +36,14 @@ cp "$ROOT/bin/fm-remote-entrypoint.sh" "$ROOT/bin/fm-remote-job-lib.sh" \
   "$ROOT/bin/fm-remote-job-worker.sh" "$ROOT/bin/fm-remote-file.sh" \
   "$ROOT/bin/fm-backlog-receive.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
   "$ROOT/bin/fm-wake-lib.sh" "$REMOTE_ROOT/bin/"
-ln -s "$(command -v tasks-axi)" "$REMOTE_ROOT/bin/tasks-axi"
-ln -s "$(command -v node)" "$REMOTE_ROOT/bin/node"
+# The remote fixture reaches the host's real tasks-axi through exec wrappers, not
+# symlinks. A packaged JS CLI resolves its own package relative to $0 - pnpm's
+# global shim loads "$(dirname "$0")/global/...", npm's loads "$(dirname "$0")/../lib/..."
+# - so a symlink here sends it looking for its package under the fixture's bin
+# directory. It then fails to load, the receive step reports tasks-axi as
+# incompatible, and the atomic-receipt assertion fails for a reason that has
+# nothing to do with the handoff under test.
+fm_fake_passthrough "$REMOTE_ROOT/bin" tasks-axi node
 chmod +x "$REMOTE_ROOT/bin"/*.sh
 git -C "$REMOTE_ROOT" init -q -b main
 git -C "$REMOTE_ROOT" config user.email test@example.com
@@ -136,7 +155,7 @@ put_wait=0
 while ! find "$REMOTE/state/handoff" -maxdepth 1 -name '.put.*' -print -quit | grep -q .; do
   kill -0 "$put_race_pid" 2>/dev/null || fail "confined put exited before staging input"
   put_wait=$((put_wait + 1))
-  [ "$put_wait" -le 250 ] || fail "confined put never staged input"
+  [ "$put_wait" -le "$MARKER_WAIT_LIMIT" ] || fail "confined put never staged input"
   sleep 0.02
 done
 mv "$REMOTE/state/handoff" "$TMP_ROOT/pinned-handoff"
@@ -231,7 +250,7 @@ wait_for_serialization=0
 while [ ! -f "$TMP_ROOT/serialize.entered" ]; do
   kill -0 "$handoff_a" 2>/dev/null || fail "first serialized handoff exited before receipt"
   wait_for_serialization=$((wait_for_serialization + 1))
-  [ "$wait_for_serialization" -le 250 ] || fail "first serialized handoff never reached receipt"
+  [ "$wait_for_serialization" -le "$MARKER_WAIT_LIMIT" ] || fail "first serialized handoff never reached receipt"
   sleep 0.02
 done
 write_backlog '- [ ] serialized-b - second concurrent handoff (repo: alpha)'
@@ -306,7 +325,7 @@ route_wait=0
 while [ ! -f "$TMP_ROOT/route.entered" ]; do
   kill -0 "$route_holder_pid" 2>/dev/null || fail "route lock holder exited before acquiring lifecycle locks"
   route_wait=$((route_wait + 1))
-  [ "$route_wait" -le 250 ] || fail "route lock holder never acquired lifecycle locks"
+  [ "$route_wait" -le "$MARKER_WAIT_LIMIT" ] || fail "route lock holder never acquired lifecycle locks"
   sleep 0.02
 done
 handoff_env "$ROOT/bin/fm-backlog-handoff.sh" ios route-race \

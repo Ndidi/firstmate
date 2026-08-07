@@ -490,19 +490,7 @@ test_git_is_required_with_supported_install_instruction() {
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  bash_env="$case_dir/no-git.bash"
-  cat > "$bash_env" <<'SH'
-command() {
-  if [ "${1:-}" = -v ] && [ "${2:-}" = git ]; then
-    return 1
-  fi
-  builtin command "$@"
-}
-git() {
-  return 127
-}
-SH
-
+  bash_env=$(fm_fake_absent_env "$case_dir/no-git.bash" git)
   out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   expected="MISSING: git (install: brew install git  # or the platform's package manager)"
@@ -511,15 +499,20 @@ SH
 }
 
 test_orca_backend_gates_orca_tool_only_when_selected() {
-  local case_dir fakebin out missing_orca
+  local case_dir fakebin bash_env out missing_orca
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
+  # Orca must be forced absent rather than assumed absent: /usr/bin/orca is the
+  # GNOME screen reader on any Linux desktop with the accessibility tool
+  # installed, and it satisfies the `command -v orca` probe while having nothing
+  # to do with the Orca runtime backend.
 
   case_dir="$TMP_ROOT/orca-backend-selected"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' orca > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  bash_env=$(fm_fake_absent_env "$case_dir/no-orca.bash" orca)
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = "$missing_orca" ] || fail "backend=orca should require only the Orca-specific missing tool, got: $out"
 
@@ -527,7 +520,8 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  bash_env=$(fm_fake_absent_env "$case_dir/no-orca.bash" orca)
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   assert_not_contains "$out" "MISSING: orca" "bootstrap should not require orca unless backend=orca is selected"
   pass "bootstrap: backend=orca gates the Orca CLI without requiring it on the default backend"
@@ -535,9 +529,12 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
 
 # Build a fake toolchain with tmux REMOVED and the named backend session CLI(s)
 # plus jq added, so a backend that must NOT require tmux can be proven silent
-# with tmux absent. Echoes the fakebin dir. The removed tmux is what makes these
+# with tmux absent. Echoes the fakebin dir. The absent tmux is what makes these
 # cases catch the old "everything but orca demands tmux" bug: with the buggy
 # TOOLS list a herdr/zellij/cmux home would report MISSING: tmux here.
+# Removing the stub is not enough to make tmux absent, because /usr/bin/tmux
+# then satisfies the probe and the case goes quietly vacuous, so every caller
+# pairs this with an fm_fake_absent_env BASH_ENV shim naming tmux.
 make_fake_toolchain_no_tmux() {  # <case-dir> <extra-cli...>
   local dir=$1 fakebin
   shift
@@ -548,7 +545,7 @@ make_fake_toolchain_no_tmux() {  # <case-dir> <extra-cli...>
 }
 
 test_session_provider_backends_do_not_require_tmux() {
-  local backend cli case_dir fakebin out
+  local backend cli case_dir fakebin bash_env out
   # herdr/zellij/cmux are session providers only: they require their own CLI, jq,
   # and treehouse, never tmux. With all genuine deps present and tmux absent,
   # bootstrap must be silent.
@@ -559,7 +556,8 @@ test_session_provider_backends_do_not_require_tmux() {
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
     printf '%s\n' "$backend" > "$case_dir/home/config/backend"
     fakebin=$(make_fake_toolchain_no_tmux "$case_dir" "$cli")
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    bash_env=$(fm_fake_absent_env "$case_dir/absent.bash" tmux)
+    out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     [ -z "$out" ] || fail "backend=$backend with tmux absent but its own deps present should be silent, got: $out"
   done <<'ROWS'
@@ -571,9 +569,11 @@ ROWS
 }
 
 test_session_provider_backends_gate_own_cli_not_tmux() {
-  local backend cli case_dir fakebin out missing
+  local backend cli case_dir fakebin bash_env out missing
   # With the backend's OWN session CLI absent (and tmux also absent), bootstrap
   # must fail closed on the genuine dep and never substitute a false tmux demand.
+  # Both absences are forced rather than assumed: a host that ships either name
+  # would otherwise turn the gate assertion into a report about its own PATH.
   while IFS='^' read -r backend cli; do
     [ -n "$backend" ] || continue
     case_dir="$TMP_ROOT/$backend-missing-cli"
@@ -582,7 +582,8 @@ test_session_provider_backends_gate_own_cli_not_tmux() {
     printf '%s\n' "$backend" > "$case_dir/home/config/backend"
     # Toolchain has jq + treehouse but NOT the session CLI and NOT tmux.
     fakebin=$(make_fake_toolchain_no_tmux "$case_dir")
-    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    bash_env=$(fm_fake_absent_env "$case_dir/absent.bash" tmux "$cli")
+    out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     if [ "$backend" = herdr ]; then
       missing="MISSING_MANUAL: herdr (instructions: https://herdr.dev)"
@@ -614,7 +615,7 @@ test_herdr_install_requires_manual_action() {
 }
 
 test_cmux_bundled_cli_satisfies_dependency() {
-  local case_dir fakebin bundle out
+  local case_dir fakebin bash_env bundle out
   case_dir="$TMP_ROOT/cmux-bundled-cli"
   mkdir -p "$case_dir/home/config" "$case_dir/bundle"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
@@ -622,7 +623,10 @@ test_cmux_bundled_cli_satisfies_dependency() {
   fakebin=$(make_fake_toolchain_no_tmux "$case_dir")
   fm_fake_exit0 "$case_dir/bundle" cmux
   bundle="$case_dir/bundle/cmux"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  # cmux is forced absent from PATH so the bundle is demonstrably what satisfies
+  # the dependency; a host-installed cmux would pass this case for the wrong reason.
+  bash_env=$(fm_fake_absent_env "$case_dir/absent.bash" tmux cmux)
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_BACKEND_CMUX_BUNDLE_BIN="$bundle" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ -z "$out" ] || fail "a usable bundled cmux CLI should satisfy bootstrap without a PATH shim, got: $out"
   pass "bootstrap: the bundled cmux CLI satisfies the active backend dependency"
@@ -646,9 +650,8 @@ test_unknown_backend_reports_invalid_configuration() {
 test_json_backends_require_jq_not_tmux() {
   local backend case_dir fakebin bash_env out
   # herdr/zellij/cmux parse their backend's JSON output, so jq is a genuine dep.
-  # jq lives in a system BASE_PATH dir on many hosts, so force it missing with a
-  # command()/jq() override (the same technique the git-required case uses) to keep
-  # the assertion host-independent.
+  # jq lives in a system BASE_PATH dir on many hosts, so force it missing rather
+  # than assume it, keeping the assertion host-independent.
   while IFS='^' read -r backend; do
     [ -n "$backend" ] || continue
     case_dir="$TMP_ROOT/$backend-missing-jq"
@@ -659,18 +662,7 @@ test_json_backends_require_jq_not_tmux() {
     fakebin=$(make_fake_toolchain "$case_dir")
     rm -f "$fakebin/tmux"
     fm_fake_exit0 "$fakebin" "$backend"
-    bash_env="$case_dir/no-jq.bash"
-    cat > "$bash_env" <<'SH'
-command() {
-  if [ "${1:-}" = -v ] && [ "${2:-}" = jq ]; then
-    return 1
-  fi
-  builtin command "$@"
-}
-jq() {
-  return 127
-}
-SH
+    bash_env=$(fm_fake_absent_env "$case_dir/no-jq.bash" jq tmux)
     out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
     assert_contains "$out" "MISSING: jq" "backend=$backend must fail closed on missing jq"
@@ -684,7 +676,7 @@ ROWS
 }
 
 test_treehouse_lease_check_follows_resolved_backend() {
-  local case_dir fakebin out
+  local case_dir fakebin bash_env out
   # A treehouse that lacks durable --lease support is only a problem for a backend
   # that actually uses treehouse. Orca owns its own worktrees, so an old treehouse
   # must NOT trip MISSING: treehouse under backend=orca...
@@ -695,8 +687,9 @@ test_treehouse_lease_check_follows_resolved_backend() {
   fakebin=$(make_fake_toolchain "$case_dir")
   rm -f "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" orca
+  bash_env=$(fm_fake_absent_env "$case_dir/absent.bash" tmux)
   # FM_FAKE_TREEHOUSE_LEASE_HELP unset: the fake treehouse advertises NO --lease.
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     "$ROOT/bin/fm-bootstrap.sh")
   [ -z "$out" ] || fail "backend=orca must not require treehouse (even lease-less) or tmux, got: $out"
 
@@ -707,7 +700,8 @@ test_treehouse_lease_check_follows_resolved_backend() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' herdr > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain_no_tmux "$case_dir" herdr)
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  bash_env=$(fm_fake_absent_env "$case_dir/absent.bash" tmux)
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$out" "MISSING: treehouse" "backend=herdr must still require treehouse with durable lease support"
   assert_not_contains "$out" "MISSING: tmux" "backend=herdr must not demand tmux even when treehouse is too old"

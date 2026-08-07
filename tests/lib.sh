@@ -151,6 +151,9 @@ fm_test_reap_orphans
 # named tools into a fakebin dir. fm_fake_version_tool drops a stub for a tool
 # whose installed version bootstrap gates, so a fixture cannot be reported as an
 # unparseable build simply for answering `--version` with nothing.
+# fm_fake_absent_env makes a tool absent, which no fakebin entry can express,
+# and fm_fake_passthrough exposes a real host tool under a fixture path without
+# breaking a launcher that resolves its own package relative to `$0`.
 
 fm_fakebin() {
   local dir=$1 fakebin="$1/fakebin"
@@ -167,6 +170,70 @@ fm_fake_exit0() {
 exit 0
 SH
     chmod +x "$fakebin/$tool"
+  done
+}
+
+# fm_fake_absent_env <path> <tool>...: write a BASH_ENV file at <path> that
+# makes each named tool undiscoverable to the script under test, and echo <path>.
+#
+# A fakebin cannot express absence. Dropping a name from it only uncovers
+# whatever the host installed under the same name, and adding a stub makes
+# `command -v <tool>` succeed. Hosts do ship binaries firstmate gates: git, jq,
+# and gh live in system bin dirs on most Linux images, and /usr/bin/orca is the
+# GNOME screen reader, entirely unrelated to the Orca runtime backend. A case
+# that proves absence by trusting the host's PATH therefore reports how the
+# machine was provisioned rather than the behavior under test - it passes on one
+# image and fails on another for reasons the assertion never mentions.
+#
+# Pass the returned path as BASH_ENV when running the script under test. Bash
+# sources it for every non-interactive shell it starts, so the override reaches
+# nested bin/*.sh helpers as well as the entry script. The `command` override
+# answers the `command -v <tool>` probe, and the same-named function makes a
+# direct call fail the way an uninstalled tool would.
+fm_fake_absent_env() {
+  local path=$1 tool
+  shift
+  {
+    cat <<'SH'
+command() {
+  case "${1:-}:${2:-}" in
+SH
+    for tool in "$@"; do
+      printf '    -v:%s) return 1 ;;\n' "$tool"
+    done
+    cat <<'SH'
+  esac
+  builtin command "$@"
+}
+SH
+    for tool in "$@"; do
+      printf '%s() { return 127; }\n' "$tool"
+    done
+  } > "$path"
+  printf '%s\n' "$path"
+}
+
+# fm_fake_passthrough <bindir> <tool>...: put a wrapper for each named tool in
+# <bindir> that execs the copy currently on PATH.
+#
+# Use this instead of `ln -s "$(command -v <tool>)"` whenever a fixture needs a
+# real host tool under a different path. A packaged JS CLI is usually a shim
+# that resolves its own package relative to `$0` - pnpm's global shim computes
+# `basedir=$(dirname "$0")` and then loads `$basedir/global/...` - so a symlink
+# from another directory sends it looking for its package beside the symlink and
+# it fails to load. `exec` sets `$0` to the resolved command, keeping the shim's
+# own path arithmetic correct. Plain compiled binaries tolerate a symlink, but
+# the caller cannot tell which kind a host installed.
+fm_fake_passthrough() {
+  local bindir=$1 tool real
+  shift
+  for tool in "$@"; do
+    real=$(command -v "$tool") || return 1
+    cat > "$bindir/$tool" <<SH
+#!/usr/bin/env bash
+exec "$real" "\$@"
+SH
+    chmod +x "$bindir/$tool"
   done
 }
 
