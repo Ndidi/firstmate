@@ -321,6 +321,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/tmux-guard.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/trace-context.md",
       "audience": "maintainer-architecture"
     },
