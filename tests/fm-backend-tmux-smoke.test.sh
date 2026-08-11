@@ -41,9 +41,13 @@ cleanup_all() {
 # socket, so bin/backends/tmux.sh's bare `tmux ...` invocations never touch the
 # host's real sessions.
 SHIM_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-backend-smoke.XXXXXX")
+# `-L` alone already wins over an ambient $TMUX, but this suite may run from
+# INSIDE a tmux pane, so the shim also clears $TMUX: two independent reasons
+# the private socket is the only server these tests can ever reach, and the
+# only server cleanup_all's kill-server can ever address.
 cat > "$SHIM_DIR/tmux" <<SH
 #!/usr/bin/env bash
-exec "$REAL_TMUX" -L "$SOCKET" "\$@"
+exec env -u TMUX "$REAL_TMUX" -L "$SOCKET" "\$@"
 SH
 chmod +x "$SHIM_DIR/tmux"
 PATH="$SHIM_DIR:$PATH"
@@ -156,6 +160,47 @@ if fm_backend_tmux_resolve_bare_selector "no-such-window-xyz" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that does not exist"
 
+# --- endpoint existence (fm_backend_target_exists) ---------------------------
+# Regression for the false-alive endpoint read that let a dead fleet report as
+# healthy: `tmux display-message -p -t <target>` resolves an unresolvable
+# target to the server's CURRENT pane and exits 0, so every recorded endpoint
+# answered "alive" while any tmux server was running, and AGENTS.md section 5
+# recovery could never fire. Each negative case below passes only because the
+# predicate REFUSES the target - none of them can be satisfied by the lenient
+# fallback, which is what makes them fail against the old implementation.
+#
+# The first assertion pins the lenient primitive's actual behavior rather than
+# assuming it: if a future tmux ever made display-message refuse, this test
+# would otherwise keep passing while silently no longer covering the defect.
+LENIENT_OUT=$(tmux display-message -p -t "${SESSION}:fm-total-nonsense-xyz" '#{pane_id}' 2>&1) \
+  || fail "display-message unexpectedly refused a nonexistent window; this suite's premise needs rechecking"
+[ -n "$LENIENT_OUT" ] \
+  || fail "display-message returned success but no pane id for a nonexistent window; premise changed"
+pass "real tmux: display-message still answers a nonexistent window from the current pane (the defect's source)"
+
+fm_backend_target_exists tmux "$TARGET" \
+  || fail "fm_backend_target_exists must report a live window as existing"
+fm_backend_target_exists tmux "$TARGET" "$WINDOW" \
+  || fail "fm_backend_target_exists must report a live window as existing when its label matches"
+pass "real tmux: fm_backend_target_exists reports a live endpoint alive, with and without a label"
+
+if fm_backend_target_exists tmux "${SESSION}:fm-total-nonsense-xyz"; then
+  fail "fm_backend_target_exists reported a window name that has NEVER existed as alive"
+fi
+if fm_backend_target_exists tmux "no-such-session-xyz:${WINDOW}"; then
+  fail "fm_backend_target_exists reported a session that has NEVER existed as alive"
+fi
+pass "real tmux: fm_backend_target_exists refuses a nonexistent window and a nonexistent session"
+
+# A tmux target is name-addressed, so the label adds nothing the target has
+# not already proven, and a label mismatch must NOT be able to report a live
+# endpoint dead: that verdict is what could start a duplicate agent on a live
+# worktree. Pin that the label is inert on this backend rather than leaving it
+# to be inferred from the absence of a test.
+fm_backend_target_exists tmux "$TARGET" "fm-some-other-task" \
+  || fail "an expected label must not be able to turn a live tmux endpoint dead"
+pass "real tmux: a live endpoint stays alive under a mismatched label (tmux targets carry their own identity)"
+
 # --- kill and recovery-grade missing-window classification ------------------
 
 fm_backend_tmux_kill "$TARGET"
@@ -165,6 +210,20 @@ fi
 state=$(fm_backend_agent_state tmux "$TARGET")
 [ "$state" = missing ] \
   || fail "a real missing window in a readable session should classify as missing, got '$state'"
+
+# The incident shape exactly: the task's window is gone but its SESSION is
+# still alive (the session's own first window survives), which is what a crash
+# that takes the workers down leaves behind once the session is back. The
+# endpoint must read dead here, or automatic recovery never fires.
+tmux has-session -t "$SESSION" \
+  || fail "the session must still exist for the crash-shaped endpoint check to be meaningful"
+if fm_backend_target_exists tmux "$TARGET" "$WINDOW"; then
+  fail "fm_backend_target_exists reported a killed window as alive while its session survived"
+fi
+if fm_backend_target_exists tmux "$TARGET"; then
+  fail "fm_backend_target_exists reported a killed window as alive with no label to fall back on"
+fi
+pass "real tmux: a killed window in a surviving session reports dead, so crash recovery can fire"
 # Best-effort contract: killing an already-gone window must not error.
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"

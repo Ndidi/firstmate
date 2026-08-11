@@ -30,6 +30,11 @@ SH
 #!/usr/bin/env bash
 case "${1:-}" in
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
+  # The endpoint-existence primitive (fm_backend_target_exists) is list-panes,
+  # not display-message: real tmux refuses an unresolvable target here rather
+  # than answering from the current pane. Mirror the dead-* rule so a dead
+  # endpoint stays dead instead of falling through to the success below.
+  list-panes) case "$*" in *dead-*) exit 1 ;; esac ;;
   capture-pane)
     case "$*" in
       *fm-domain-alpha*) printf 'stale terminal summary: Phase 7 started\n> \n' ;;

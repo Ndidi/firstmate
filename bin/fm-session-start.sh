@@ -686,7 +686,14 @@ for meta in "$STATE"/*.meta; do
 
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")
-  if [ -n "$window" ]; then
+  # A remote secondmate's endpoint lives on ANOTHER host, so no local backend
+  # read can answer for it; bin/fm-fleet-snapshot.sh already routes this case
+  # through fm-on.sh instead. Say so rather than reporting a local verdict:
+  # before fm_backend_target_exists refused a missing tmux target, the lenient
+  # probe happened to answer "alive" here for the wrong reason.
+  if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
+    printf 'endpoint: remote (not checked locally; window=%s)\n' "${window:-unknown}"
+  elif [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
     if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
       printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"

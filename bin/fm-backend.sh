@@ -828,14 +828,39 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # probe). A gone tmux window or an unqueryable herdr pane (server down, pane
 # closed), missing zellij pane, or unreadable Orca terminal simply fails, which
 # IS "does not exist" for this purpose.
-# Mirrors fm-crew-state.sh's pane_readable check; exists here as one shared
-# primitive so callers that only need a fast alive/dead read (recovery
-# digests, the session-start fleet digest) do not re-derive it inline.
+# The one shared primitive for callers that need a fast alive/dead read
+# (recovery digests, the session-start fleet digest, fm-crew-state.sh's
+# pane_readable), so none of them re-derives it inline.
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      # `display-message -p -t <target>` is NOT a target check and must never
+      # be used as one: tmux resolves an unresolvable target to the server's
+      # CURRENT pane instead of refusing, attached and detached alike
+      # (docs/tmux-backend.md "Endpoint existence"). A window name that has
+      # never existed exits 0 and prints the current pane's id, and a session
+      # name that has never existed exits 0 printing an EMPTY result. Since
+      # this predicate reads only the exit status, that made every recorded
+      # endpoint answer "alive" for as long as ANY tmux server was running, so
+      # the recovery paths in AGENTS.md section 5 could not fire after a crash
+      # that took the workers down without letting their hooks run.
+      #
+      # `list-panes -t` refuses both shapes with rc=1 (`can't find window:` /
+      # `can't find session:`), addressed by name, index, window id, or pane
+      # id, so it is the structural read.
+      #
+      # expected_label is deliberately NOT consulted here, unlike the zellij
+      # and cmux branches below. Those address an opaque numeric or uuid pane
+      # id that carries no task identity, so the label is their only way to
+      # bind a resolved pane to its task. A tmux target is name-addressed by
+      # construction (fm-spawn.sh records `window=<session>:fm-<id>` and pins
+      # the name with automatic-rename off), so the label is already inside
+      # the target and list-panes has just verified it. Comparing the resolved
+      # `#{window_name}` on top would only add a way to report a LIVE endpoint
+      # dead when a record legitimately carries another window name - the one
+      # verdict that can start a duplicate agent on a live worktree.
+      tmux list-panes -t "$target" >/dev/null 2>&1
       ;;
     herdr)
       fm_backend_source herdr || return 1

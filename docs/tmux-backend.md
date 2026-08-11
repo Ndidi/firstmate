@@ -44,6 +44,25 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 ## Current behavior and safety
 
+### Endpoint existence
+
+Whether a recorded endpoint still exists is read with `list-panes`, never with `display-message`.
+tmux does not resolve `-t` uniformly across commands: `display-message` treats a target it cannot resolve as a request for the server's current pane and exits 0, while `list-panes` and `has-session` refuse with `can't find window:` or `can't find session:`.
+A window name that has never existed therefore returns the current pane's id and exit status 0, and a session name that has never existed returns an empty result and still exit status 0.
+Neither depends on a client being attached.
+[verification/runtime-backends.md](verification/runtime-backends.md#endpoint-existence) holds the dated commands and output.
+
+This matters because a predicate that reads only the exit status reports every recorded endpoint as alive for as long as any tmux server is running.
+A crash that takes the workers down without letting their hooks run then leaves the fleet reporting healthy, and the recovery paths in AGENTS.md section 5 never fire.
+
+The caller's task label is accepted but not consulted on this backend, unlike zellij and cmux.
+Those address an opaque pane id that carries no task identity, so the label is their only way to bind a resolved pane to its task.
+A tmux target is name-addressed by construction, so the label is already inside the target and `list-panes` has just verified it.
+Comparing the resolved window name on top would only add a way to report a live endpoint dead, which is the one verdict that can start a duplicate agent on a live worktree.
+
+`send-keys` refuses an unresolvable target correctly, which is why input delivery and agent control were never exposed to this.
+`bin/fm-tmux-lib.sh` still reads `#{cursor_y}`, `#{pane_tty}`, and `#{pane_current_command}` through `display-message`, which is sound there: those callers consume the returned value and treat an empty read as unknown rather than inferring existence from the exit status.
+
 ### Agent liveness probe
 
 A target-existence check proves only that the pane exists.

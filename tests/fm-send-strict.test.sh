@@ -56,6 +56,22 @@ case "${1:-}" in
     [ "$cursor" = 1 ] && { printf '1\n'; exit 0; }
     printf '%%1\n'
     exit 0 ;;
+  list-panes)
+    # The endpoint-existence primitive (fm_backend_target_exists). Real tmux
+    # refuses a target it cannot resolve here, unlike display-message's
+    # current-pane fallback modelled above, so the dead-target switch has to
+    # reach this arm too rather than the catch-all success below.
+    target=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) target=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ -n "${FM_FAKE_TMUX_DEAD_TARGET:-}" ] && [ "$target" = "$FM_FAKE_TMUX_DEAD_TARGET" ]; then
+      exit 1
+    fi
+    exit 0 ;;
   capture-pane)
     printf '╭────╮\n│    │\n╰────╯\n'
     exit 0 ;;

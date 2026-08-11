@@ -86,6 +86,13 @@ case "${1:-}" in
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     printf '%%1\n' ;;
+  list-panes)
+    # The endpoint-existence primitive (fm_backend_target_exists). Real tmux
+    # refuses a target it cannot resolve here, unlike display-message; this
+    # arm exists so FM_FAKE_TMUX_MISSING actually reaches the liveness read
+    # instead of falling through to the catch-all success below.
+    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    exit 0 ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"

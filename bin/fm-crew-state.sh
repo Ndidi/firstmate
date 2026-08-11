@@ -149,7 +149,15 @@ BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
-    tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
+    # Delegated, never re-derived here: this used to run its own
+    # `tmux display-message -p -t` probe, which tmux answers from the CURRENT
+    # pane rather than refusing when the target is gone (see
+    # fm_backend_target_exists in bin/fm-backend.sh for the verified shape).
+    # A dead crew therefore passed this gate and then reported `working` from
+    # its own stale busy record, which no killed worker can ever clear.
+    tmux) fm_backend_target_exists tmux "$1" "$EXPECTED_LABEL" ;;
+    # Other backends keep the capture read: it proves the pane is not just
+    # present but READABLE, which is what the no-run fallback below needs.
     *) fm_backend_capture "$TASK_BACKEND" "$1" 1 "$EXPECTED_LABEL" >/dev/null 2>&1 ;;
   esac
 }

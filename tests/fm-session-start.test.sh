@@ -287,23 +287,36 @@ SH
   chmod +x "$fakebin/ps"
 }
 
-# make_fake_tmux <fakebin> <live-target>: display-message succeeds only for
-# the given "session:window" target - the exact primitive
-# fm_backend_target_exists uses for a tmux endpoint liveness read.
+# make_fake_tmux <fakebin> <live-target>: `list-panes` succeeds only for the
+# given "session:window" target - the exact primitive fm_backend_target_exists
+# uses for a tmux endpoint liveness read.
+#
+# `display-message` deliberately succeeds for EVERY target, printing the live
+# pane, because that is what real tmux does: it resolves an unresolvable
+# target to the current pane rather than refusing (docs/tmux-backend.md
+# "Endpoint existence"). Modelling that faithfully is what keeps this fixture
+# honest - a fake that refused would let a liveness read built on
+# display-message pass here while reporting a dead fleet as alive in
+# production, which is exactly how that defect survived.
 make_fake_tmux() {
   local fakebin=$1 live=$2
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
+target=""
+prev=""
+for a in "\$@"; do
+  [ "\$prev" = "-t" ] && target="\$a"
+  prev="\$a"
+done
 case "\${1:-}" in
   display-message)
-    target=""
-    prev=""
-    for a in "\$@"; do
-      [ "\$prev" = "-t" ] && target="\$a"
-      prev="\$a"
-    done
-    [ "\$target" = "$live" ] && { printf '%%1\n'; exit 0; }
+    printf '%%1\n'
+    exit 0
+    ;;
+  list-panes)
+    [ "\$target" = "$live" ] && { printf '%s\n' "${live#*:}"; exit 0; }
+    printf "can't find window\n" >&2
     exit 1
     ;;
 esac
@@ -368,6 +381,15 @@ case "${1:-}" in
         ;;
       unreadable) exit 1 ;;
     esac
+    ;;
+  list-panes)
+    # The endpoint-existence primitive (fm_backend_target_exists). Real tmux
+    # REFUSES a target it cannot resolve here, unlike display-message's
+    # current-pane fallback modelled above, so this arm mirrors the window
+    # inventory below rather than the lenient probe.
+    [ -e "$spawned" ] && exit 0
+    [ ! -e "$killed" ] && { [ "$mode" = ambiguous ] || [ "$mode" = shell ]; } && exit 0
+    exit 1
     ;;
   list-windows)
     if [ "$mode" = unreadable ] && [ ! -e "$spawned" ] && [ ! -e "$killed" ]; then

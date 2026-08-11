@@ -1371,6 +1371,16 @@ reap_task_backend_process_group() {  # <label>
     echo "warning: lsof is unavailable; cannot resolve a process-group fallback for $BACKEND task $ID" >&2
     return 0
   fi
+  # A gone endpoint has no process group to reap, and the read below cannot
+  # detect that on its own: `display-message` answers #{pane_pid} from the
+  # server's CURRENT pane rather than refusing an unresolvable target
+  # (bin/fm-backend.sh's fm_backend_target_exists owns the verified shape).
+  # On this fallback path that pid would be whatever pane teardown is running
+  # in - firstmate's own - so establish the endpoint exists before reading it.
+  if ! fm_backend_target_exists tmux "$T"; then
+    echo "warning: lsof is unavailable; tmux endpoint $T for $ID no longer exists, so there is no process group to reap" >&2
+    return 0
+  fi
   leader=$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null) || leader=""
   case "$leader" in ''|*[!0-9]*)
     echo "warning: lsof is unavailable; cannot resolve the tmux pane process group for $ID" >&2

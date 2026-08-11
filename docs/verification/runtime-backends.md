@@ -30,6 +30,55 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Endpoint existence
+
+Target resolution was verified on 2026-08-11 with tmux 3.7b on Ubuntu 24.04.4 LTS, Linux 6.8.0 x86_64, on a private socket.
+
+```sh
+tmux new-session -d -s fmtest -n testwin
+tmux display-message -p -t fmtest:nosuchwin '#{pane_id}'; echo "rc=$?"
+tmux has-session -t fmtest:nosuchwin; echo "rc=$?"
+tmux list-panes -t fmtest:nosuchwin; echo "rc=$?"
+tmux display-message -p -t nosuchsess:testwin '#{pane_id}'; echo "rc=$?"
+tmux list-panes -t nosuchsess:testwin; echo "rc=$?"
+tmux list-panes -t fmtest:testwin -F '#{window_name}'; echo "rc=$?"
+```
+
+Observed output:
+
+```text
+%0
+rc=0
+can't find window: nosuchwin
+rc=1
+can't find window: nosuchwin
+rc=1
+
+rc=0
+can't find session: nosuchsess
+rc=1
+testwin
+rc=0
+```
+
+`display-message` answered a window that has never existed with the current pane's id at rc=0, and a session that has never existed with an empty result at rc=0.
+The same two results were observed with no client attached and with a client attached to the session, so the fallback is a property of target resolution rather than of client state.
+`has-session` and `list-panes` refused both.
+`list-panes` is the endpoint-existence primitive.
+
+Its refusal holds across every target address form firstmate can record, verified in the same run:
+
+```sh
+tmux list-panes -t s1:w0   # rc=0        tmux list-panes -t s1:nope  # rc=1
+tmux list-panes -t s1:0    # rc=0        tmux list-panes -t s1:99    # rc=1
+tmux list-panes -t @0      # rc=0        tmux list-panes -t @99      # rc=1
+tmux list-panes -t %0      # rc=0        tmux list-panes -t %99      # rc=1
+```
+
+Window name, window index, window id, and pane id all resolve when live and all refuse when absent.
+
+`tests/fm-backend-tmux-smoke.test.sh` is the regression entry point and asserts the `display-message` leniency directly, so the coverage cannot go vacuous if a future tmux changes that behavior.
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.
