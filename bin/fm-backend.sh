@@ -838,14 +838,23 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # probe). A gone tmux window or an unqueryable herdr pane (server down, pane
 # closed), missing zellij pane, or unreadable Orca terminal simply fails, which
 # IS "does not exist" for this purpose.
-# Mirrors fm-crew-state.sh's pane_readable check; exists here as one shared
-# primitive so callers that only need a fast alive/dead read (recovery
-# digests, the session-start fleet digest) do not re-derive it inline.
+# The one owner of that probe: fm-crew-state.sh's pane_readable calls straight
+# into this for tmux rather than keeping its own copy, so callers that need a
+# fast alive/dead read (recovery digests, the session-start fleet digest) never
+# re-derive it inline and the two can never drift apart again.
 fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      # list-panes, NOT display-message: display-message is an informational
+      # command that falls back to the CALLER'S OWN pane and exits 0 when the
+      # target does not resolve, so it answers "yes" for a missing window, a
+      # missing session, and a bogus window id alike (verified on tmux 3.7b).
+      # That made every dead endpoint read alive after a tmux server crash,
+      # because a restarted firstmate recreates the `firstmate` session the
+      # recorded targets name. list-panes asks the question this check actually
+      # means - is there a pane there - and fails when there is not.
+      tmux list-panes -t "$target" >/dev/null 2>&1
       ;;
     herdr)
       fm_backend_source herdr || return 1

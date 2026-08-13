@@ -290,16 +290,18 @@ SH
   chmod +x "$fakebin/ps"
 }
 
-# make_fake_tmux <fakebin> <live-target>: display-message succeeds only for
-# the given "session:window" target - the exact primitive
+# make_fake_tmux <fakebin> <live-target>: list-panes succeeds only for the
+# given "session:window" target - the exact primitive
 # fm_backend_target_exists uses for a tmux endpoint liveness read.
+# display-message keeps the same rule so the fixture stays coherent, but the
+# liveness verdict is read from list-panes.
 make_fake_tmux() {
   local fakebin=$1 live=$2
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
 case "\${1:-}" in
-  display-message)
+  list-panes|display-message)
     target=""
     prev=""
     for a in "\$@"; do
@@ -332,6 +334,17 @@ mate_home=${FM_FAKE_SECOND_MATE_HOME:?}
 mate_id=${FM_FAKE_SECOND_MATE_ID:?}
 mate_window="fm-$mate_id"
 case "${1:-}" in
+  list-panes)
+    # The endpoint-liveness primitive (fm_backend_target_exists). Its presence
+    # answer mirrors the list-windows inventory below rather than
+    # display-message's active-window fallback, so a recorded window that is
+    # genuinely absent reads as absent.
+    [ -e "$spawned" ] && exit 0
+    if [ ! -e "$killed" ] && { [ "$mode" = ambiguous ] || [ "$mode" = shell ]; }; then
+      exit 0
+    fi
+    exit 1
+    ;;
   display-message)
     target=
     format=

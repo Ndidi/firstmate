@@ -73,6 +73,34 @@ if fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" 2>/dev/null; then
 fi
 pass "real tmux: fm_backend_tmux_create_task creates a window and refuses a duplicate"
 
+# --- target_exists must DISCRIMINATE -----------------------------------------
+# The regression this pins: fm_backend_target_exists (and, through it,
+# fm-crew-state.sh's pane_readable) once probed with
+# `tmux display-message -p -t "$target" '#{pane_id}'`. display-message is an
+# informational command that falls back to the CALLER'S OWN pane and exits 0
+# when the target does not resolve, making the predicate very nearly
+# unconditionally true. A tmux server crash therefore left every dead crew
+# reading `endpoint: alive`, because the restarted firstmate recreates the
+# session its recorded targets name.
+#
+# Both directions matter, and the negative one is the whole bug: a window that
+# does NOT exist INSIDE A SESSION THAT DOES must not read as existing. Assert
+# it here with a real server so no future refactor can quietly reintroduce a
+# probe that answers yes to everything.
+fm_backend_target_exists tmux "$TARGET" \
+  || fail "fm_backend_target_exists must find the live window '$TARGET'"
+pass "real tmux: fm_backend_target_exists finds a window that exists"
+
+if fm_backend_target_exists tmux "$SESSION:fm-does-not-exist"; then
+  fail "fm_backend_target_exists reported a missing window inside the live session '$SESSION' as existing"
+fi
+pass "real tmux: fm_backend_target_exists rejects a missing window inside a session that DOES exist"
+
+if fm_backend_target_exists tmux "no-such-session-xyz:$WINDOW"; then
+  fail "fm_backend_target_exists reported a window in a wholly missing session as existing"
+fi
+pass "real tmux: fm_backend_target_exists rejects a window in a session that does not exist"
+
 # --- send text + Enter -------------------------------------------------------
 
 # A newly-created interactive shell can exist before its startup files and line
@@ -161,6 +189,9 @@ pass "real tmux: fm_backend_tmux_resolve_bare_selector fails for a window that d
 fm_backend_tmux_kill "$TARGET"
 if tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$WINDOW"; then
   fail "fm_backend_tmux_kill did not remove the window"
+fi
+if fm_backend_target_exists tmux "$TARGET"; then
+  fail "fm_backend_target_exists still reports the killed window '$TARGET' as existing"
 fi
 state=$(fm_backend_agent_state tmux "$TARGET")
 [ "$state" = missing ] \
