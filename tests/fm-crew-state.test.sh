@@ -83,6 +83,13 @@ SH
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  list-panes)
+    # The endpoint-liveness primitive (fm_backend_target_exists, which
+    # fm-crew-state.sh's pane_readable calls for tmux). Honors the same
+    # missing-endpoint switch as display-message: a fake that succeeded for
+    # every target could only ever confirm the alive case.
+    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
+    printf '0: [80x24] [history 0/2000, 0 bytes] %%1 (active)\n' ;;
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     printf '%%1\n' ;;

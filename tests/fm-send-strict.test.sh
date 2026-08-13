@@ -40,6 +40,22 @@ case "${1:-}" in
       exit 1
     fi
     exit 0 ;;
+  list-panes)
+    # The endpoint-liveness primitive (fm_backend_target_exists). Honors the
+    # same dead-target switch as display-message below: a fake that answered
+    # yes for every target could only ever confirm the alive case.
+    target=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) target=$2; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ -n "${FM_FAKE_TMUX_DEAD_TARGET:-}" ] && [ "$target" = "$FM_FAKE_TMUX_DEAD_TARGET" ]; then
+      exit 1
+    fi
+    printf '0: [80x24] [history 0/2000, 0 bytes] %%1 (active)\n'
+    exit 0 ;;
   display-message)
     target=
     cursor=0
