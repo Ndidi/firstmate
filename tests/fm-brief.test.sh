@@ -319,6 +319,35 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
+# The captain reads PR bodies as the merge authority, so both PR-raising modes
+# must carry the TLDR contract, and local-only (which raises no PR) must not.
+test_pr_body_tldr_contract() {
+  local home id brief
+  home="$TMP_ROOT/tldr-home"
+  mkdir -p "$home/data"
+  id="brief-tldr-c1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "Open the PR body with a short bullet TLDR before any detail" "$brief" \
+    "direct-PR brief lost the PR-body TLDR contract"
+  assert_grep "We introduced a launch-time isolation check to protect" "$brief" \
+    "direct-PR TLDR contract lost its worked example"
+  id="brief-tldr-c2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "you cannot set that body's final shape from here" "$brief" \
+    "no-mistakes brief must state the template limitation plainly"
+  assert_grep "which is as far as this contract reaches" "$brief" \
+    "no-mistakes brief lost the honest reach of the TLDR framing"
+  assert_no_grep "Open the PR body with a short bullet TLDR" "$brief" \
+    "no-mistakes brief must not claim control of the pipeline-generated body"
+  id="brief-tldr-c3"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
+  assert_no_grep "TLDR" "$home/data/$id/brief.md" \
+    "local-only raises no PR and must not carry a PR-body contract"
+  pass "fm-brief.sh: PR-raising modes carry the PR-body TLDR contract"
+}
+
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
@@ -721,6 +750,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_pr_body_tldr_contract
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
