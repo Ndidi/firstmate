@@ -20,6 +20,15 @@ export FM_GATE_REFUSE_BYPASS=1
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 
+# The fixture below symlinks the REAL tmux adapter, so fm-teardown's kill path
+# runs a genuine `tmux kill-window -t "=fakeses:=fm-<id>"`. Only the fixture's
+# invented session name keeps that off a live server - a name-collision away
+# from reaching real work, which is not a safety boundary. Isolation makes the
+# kill unreachable rather than merely unlucky. See tests/tmux-test-safety.sh.
+# shellcheck source=tests/tmux-test-safety.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmux-test-safety.sh"
+tmux_isolate_or_fail gotmp
+
 fail() {
   printf 'not ok - %s\n' "$1" >&2
   exit 1
@@ -35,14 +44,20 @@ cleanup() {
   if [ -n "${TMP_ROOT:-}" ]; then
     rm -rf "$TMP_ROOT"
   fi
+  # This trap replaces the one tmux-test-safety.sh installs, so it owns tearing
+  # down the private server too - the contract that file documents.
+  tmux_isolation_cleanup
 }
 trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-gotmp-tests.XXXXXX")
 
 # Build a fake FM_HOME/FM_ROOT so the real fm-teardown.sh (symlinked in) resolves
 # state and helper scripts inside it. Stub the helper scripts fm-teardown calls so no
-# live tmux/treehouse/fleet state is touched. A nonexistent worktree path makes both
+# live treehouse/fleet state is touched, and tmux is redirected to a private server
+# above so the adapter kill cannot reach one. A nonexistent worktree path makes both
 # `if [ -d "$WT" ]` guards skip, so teardown runs straight to the cleanup + state rm.
 make_fake_root() {
   local id=$1 tasktmp=$2
