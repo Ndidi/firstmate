@@ -13,13 +13,26 @@
 # pins the distinction directly, with the Herdr prose asserted present so the case
 # cannot go quietly vacuous if that section is ever reworded.
 #
-# Every case here fails before any endpoint, worktree, or backend side effect, so
-# the tests create no windows and no worktrees. FM_SPAWN_NO_GUARD=1 keeps them off
-# the live watcher guard and state.
+# Every case here is EXPECTED to fail before any endpoint, worktree, or backend
+# side effect, so a passing run creates no windows and no worktrees.
+# FM_SPAWN_NO_GUARD=1 keeps them off the live watcher guard and state.
+#
+# That expectation held for the passing path and not for the failing one. On
+# 2026-08-19 this file left an `fm-unfilled-ship` window in the captain's own
+# live session, owned by no task: while the placeholder guard was under
+# development the spawn ran on to create the window, and the test then died at
+# its first failed assertion with the window still there. The guard being
+# checked is exactly the thing whose absence carries the run into the backend,
+# so this file must never depend on it holding. tmux_isolate puts every tmux
+# call on a private server, which makes that reachable-backend path harmless
+# instead of merely unlikely. See tests/tmux-test-safety.sh.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/tmux-test-safety.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmux-test-safety.sh"
+tmux_isolate_or_fail spawn-unfilled-brief
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 BRIEF="$ROOT/bin/fm-brief.sh"
@@ -95,6 +108,7 @@ test_filled_brief_is_not_refused() {
   # Herdr prose still mentions it inline. Assert both, so a future rewording of
   # that section turns this test red rather than silently vacuous.
   grep -qx '{TASK}' "$brief" && fail "fixture still holds a placeholder line; the test would prove nothing"
+  # shellcheck disable=SC2016  # a literal backticked {TASK}, not a substitution
   grep -F 'replaces `{TASK}` later' "$brief" >/dev/null \
     || fail "the un-enabled Herdr section no longer mentions {TASK} inline; this test can no longer prove the anchor is needed"
 
@@ -120,6 +134,7 @@ test_placeholder_quoted_in_task_text_is_not_refused() {
   FM_HOME="$home" "$BRIEF" quoted-ship alpha --mode local-only --scope-given >/dev/null 2>&1 \
     || fail "could not scaffold the fixture brief"
   brief="$home/data/quoted-ship/brief.md"
+  # shellcheck disable=SC2016  # a literal backticked {TASK}, not a substitution
   fill_task "$brief" 'Make the scaffold stop emitting a bare `{TASK}` marker without a scope source.'
 
   out=$(run_spawn "$home" quoted-ship projects/alpha --mode no-mistakes --yolo off)

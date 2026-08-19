@@ -48,6 +48,11 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
+#          A "window ... is not claimed by any task in this home" BOOTSTRAP_INFO
+#          line reports an fm-* window the fleet view cannot see, because that view
+#          reconciles from state/*.meta. Detect-only: it may be a leftover or
+#          another firstmate home's live work, so nothing is ever killed on its
+#          account (bin/fm-unowned-window-lib.sh).
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -136,6 +141,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-tangle-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tangle-lib.sh"
+# shellcheck source=bin/fm-unowned-window-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-unowned-window-lib.sh"
 # shellcheck source=bin/fm-ff-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh disable=SC1091
@@ -1173,6 +1180,13 @@ detect_local_config() {
       echo "TANGLE: primary checkout on feature branch '$tangle_branch' (expected '$tangle_default'); the work is safe on that ref - restore the primary with: git -C $FM_ROOT checkout $tangle_default, then re-validate the branch in a proper worktree"
     fi
   fi
+  # Unclaimed-window check: report any fm-* window no task in this home claims,
+  # so a window firstmate's own fleet view cannot see (it reconciles from
+  # state/*.meta) is still surfaced. Detect-only and never remediating - a
+  # window this home does not recognise may be another home's live work. See
+  # bin/fm-unowned-window-lib.sh.
+  fm_unowned_window_report "$STATE"
+
   crew=
   [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ -n "$crew" ] && [ "$crew" != "default" ]; then

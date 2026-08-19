@@ -9,6 +9,13 @@ set -u
 
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+# The daemon's pane helpers resolve endpoints through `tmux list-windows -a`,
+# which without this reads the CAPTAIN'S live window list. Read-only, so not the
+# leak this file was audited for - but it makes the result depend on whatever the
+# captain happens to have open, and it is one code change away from writing.
+# shellcheck source=tests/tmux-test-safety.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmux-test-safety.sh"
+tmux_isolate_or_fail daemon
 
 DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 AFK_START="$ROOT/bin/fm-afk-start.sh"

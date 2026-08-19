@@ -23,6 +23,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAUNCH="$ROOT/bin/fm-afk-launch.sh"
 START="$ROOT/bin/fm-afk-start.sh"
 
+# Both tmux layers below create real sessions and then kill them BY NAME on the
+# server they happen to reach. Uniquely-named throwaways plus a cleanup trap made
+# that survivable, not safe: the trap is skipped by an interrupt, and a name-based
+# `kill-session` aimed at the captain's live server is one name-collision away
+# from reaching real work. Every session here is one this file creates itself -
+# including the stand-in "captain session" whose pane count the topology
+# invariant measures - so a private server preserves every assertion while
+# removing the reach. See tests/tmux-test-safety.sh.
+# shellcheck source=tests/tmux-test-safety.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tmux-test-safety.sh"
+tmux_isolate_or_fail afk-launch
+
 FAILED=0
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -37,8 +49,14 @@ GLOBAL_CLEANUP() {
   for s in $TRACK_TMUX_SESSIONS; do
     tmux kill-session -t "$s" 2>/dev/null || true
   done
+  # This trap REPLACES the one tmux-test-safety.sh installs, so it owns tearing
+  # down the private server too - the contract that file documents.
+  tmux_isolation_cleanup
 }
 trap GLOBAL_CLEANUP EXIT
+# The interrupt paths the original EXIT-only trap left uncovered.
+trap 'GLOBAL_CLEANUP; exit 130' INT
+trap 'GLOBAL_CLEANUP; exit 143' TERM
 
 # ---------------------------------------------------------------------------
 # UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
