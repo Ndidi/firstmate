@@ -156,6 +156,12 @@
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
 #     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
 #                  written by this script; outside the worktree to avoid pi's trust gate)
+#     __CLAUDESETTINGSFLAG__ optional `--settings <path>` naming
+#                  state/<task-id>.claude-settings.json (claude's busy-state and
+#                  turn-end hooks, written by this script; outside the worktree so a
+#                  project that TRACKS .claude/settings.local.json keeps its own file).
+#                  Empty unless that file exists, because claude refuses to start on a
+#                  --settings path it cannot read and a secondmate arms no busy wiring.
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
@@ -1111,7 +1117,7 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __CLAUDESETTINGSFLAG____MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -2292,6 +2298,10 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+# claude's hook settings, written outside the worktree (see the claude arm below).
+# Only armed for a crewmate/scout, so the launch flag stays conditional on the
+# file existing: claude refuses to start on a --settings path it cannot read.
+CLAUDE_SETTINGS="$STATE_REAL/$ID.claude-settings.json"
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -2361,17 +2371,24 @@ if [ "$KIND" != secondmate ]; then
       # the turn-ended NOTIFICATION touch for the watcher. Every
       # hook command tolerates a refused event (|| true) so a stale-gen writer
       # can never break Claude's own lifecycle.
-      mkdir -p "$WT/.claude"
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
       j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
       j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
-      cat > "$WT/.claude/settings.local.json" <<EOF
+      # Written OUTSIDE the worktree and loaded with --settings, for the same
+      # reason pi's extension is: a project may TRACK .claude/settings.local.json
+      # (it carries a project's pre-approved tool permissions), and writing there
+      # replaces a tracked file no worker authored - which strands teardown on a
+      # dirty tracked file and puts the project's whole permission allowlist one
+      # `git add -A` away from being committed away. Verified live on claude
+      # 2.1.235: this document loads and fires from --settings, and it fires even
+      # in an untrusted workspace, where a worktree-resident settings file has its
+      # entries dropped. docs/verification/claude-settings.md owns that evidence.
+      cat > "$CLAUDE_SETTINGS" <<EOF
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
-      exclude_path '.claude/settings.local.json'
       ;;
     opencode*)
       mkdir -p "$WT/.opencode/plugins"
@@ -2725,6 +2742,13 @@ sq_piturnend=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-turnend-guard.ts
 sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
+# Only claude, and only when the arm above actually wrote the file: claude
+# treats an unreadable --settings path as a hard startup error, and a secondmate
+# launch installs no busy wiring.
+CLAUDESETTINGSFLAG=
+if [ "$HARNESS" = claude ] && [ -f "$CLAUDE_SETTINGS" ]; then
+  CLAUDESETTINGSFLAG="--settings $(shell_quote "$CLAUDE_SETTINGS") "
+fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT")
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -2732,6 +2756,7 @@ LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
+LAUNCH=${LAUNCH//__CLAUDESETTINGSFLAG__/$CLAUDESETTINGSFLAG}
 LAUNCH=${LAUNCH//__PITURNEND__/$sq_piturnend}
 LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}

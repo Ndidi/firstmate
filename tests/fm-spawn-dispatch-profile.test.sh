@@ -165,7 +165,9 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  # --settings carries claude's own per-task hooks from state/, outside the
+  # worktree; bin/fm-spawn.sh owns why they do not live in the project.
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --settings '$HOME_DIR/state/$id.claude-settings.json' \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -429,7 +431,7 @@ test_claude_threads_model_and_effort() {
   expect_code 0 "$status" "claude spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude sonnet high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
+  assert_contains "$launch" "--model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
   assert_not_contains "$launch" "--tui-mode" "non-Pi launches must not receive Pi's TUI mode override"
   pass "claude receives --model and --effort profile flags"
@@ -740,6 +742,32 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }
 
+# A claude secondmate arms no busy wiring, so no hook settings file is written.
+# claude treats an unreadable --settings path as a hard startup error, so the flag
+# has to be omitted rather than pointed at a file that does not exist.
+test_claude_secondmate_omits_the_settings_flag_it_has_no_file_for() {
+  local rec id sm out status launch
+  id=profile-claude-secondmate-z8e
+  rec=$(make_spawn_case profile-claude-secondmate codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' claude > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  sm=$(cd "$sm" && pwd -P)
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "claude secondmate spawn should succeed: $out"
+  assert_contains "$out" "spawned $id harness=claude kind=secondmate" \
+    "claude secondmate spawn did not report its runtime identity"
+  assert_absent "$HOME_DIR/state/$id.claude-settings.json" \
+    "a secondmate arms no busy wiring, so it must write no hook settings"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--settings" \
+    "the launch must not name a hook settings file that was never written"
+  pass "a claude secondmate launches without a --settings path it has no file for"
+}
+
 test_batch_forwards_shared_profile_flags() {
   local rec id1 id2 out status
   id1=profile-batch-a-z9
@@ -852,6 +880,7 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi
 test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
+test_claude_secondmate_omits_the_settings_flag_it_has_no_file_for
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
 test_claude_omits_config_dir_prefix_when_unset

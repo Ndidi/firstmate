@@ -30,7 +30,10 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
-  has-session|new-session|new-window|kill-window|send-keys) exit 0 ;;
+  send-keys)
+    [ -z "${FM_FAKE_LAUNCH_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_LAUNCH_LOG"
+    exit 0 ;;
+  has-session|new-session|new-window|kill-window) exit 0 ;;
 esac
 exit 0
 SH
@@ -39,8 +42,11 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-make_spawn_case() {  # <name> <harness> <id>
-  local name=$1 harness=$2 id=$3 case_dir home proj wt fakebin
+make_spawn_case() {  # <name> <harness> <id> [seed-fn]
+  # seed-fn, when given, is called with the project dir after its first commit
+  # and before its origin and worktree exist, so anything it commits is part of
+  # the base fm-spawn fetches and resets the task worktree to.
+  local name=$1 harness=$2 id=$3 seed=${4:-} case_dir home proj wt fakebin
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
@@ -48,7 +54,10 @@ make_spawn_case() {  # <name> <harness> <id>
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
-  fm_git_worktree "$proj" "$wt" "wt-$name"
+  fm_git_init_commit "$proj"
+  [ -z "$seed" ] || "$seed" "$proj"
+  fm_git_add_origin "$proj" "$proj.origin.git"
+  git -C "$proj" worktree add --quiet -b "wt-$name" "$wt"
   touch "$home/state/.last-watcher-beat"
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
@@ -66,6 +75,7 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="${FM_FAKE_LAUNCH_LOG:-}" \
     GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -263,7 +273,7 @@ test_claude_hooks_semantic_lifecycle() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "claude spawn should succeed: $out"
   state="$HOME_DIR/state"
-  settings="$WT_DIR/.claude/settings.local.json"
+  settings="$HOME_DIR/state/$id.claude-settings.json"
   assert_present "$settings" "claude spawn did not write hook settings"
   jq -e . "$settings" >/dev/null || fail "claude hook settings are not valid JSON"
   for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
@@ -301,13 +311,67 @@ test_claude_hooks_stale_incarnation_harmless() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "claude spawn should succeed: $out"
   state="$HOME_DIR/state"
-  settings="$WT_DIR/.claude/settings.local.json"
+  settings="$HOME_DIR/state/$id.claude-settings.json"
   "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
   run_claude_hook "$settings" UserPromptSubmit \
     || fail "a stale-gen hook must still exit 0 so Claude's lifecycle is never broken"
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "a stale-gen hook event must not change state, got '$out'"
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
+}
+
+# Versions .claude/settings.local.json in the project. -f because a developer's
+# global ignore commonly lists this path, which is exactly how it stays tracked
+# in one project while being untracked everywhere else.
+seed_tracked_claude_settings() {  # <project-dir>
+  local proj=$1
+  mkdir -p "$proj/.claude"
+  printf '%s\n' '{"permissions":{"allow":["Bash(npm test:*)"],"deny":[]}}' \
+    > "$proj/.claude/settings.local.json"
+  git -C "$proj" add -f .claude/settings.local.json \
+    || fail "could not stage the tracked settings fixture"
+  git -C "$proj" -c user.name=t -c user.email=t@e commit -qm "track permissions" \
+    || fail "could not commit the tracked settings fixture"
+}
+
+# Regression: a project may TRACK .claude/settings.local.json to version its own
+# pre-approved tool permissions. Firstmate used to write its hooks there, which
+# replaced that tracked file with a one-line hooks document no worker authored -
+# stranding teardown on a dirty tracked file and leaving the project's permission
+# allowlist one `git add -A` from being committed away. Claude's hooks now live
+# in state/ and load with --settings, so the worktree is never written to.
+test_claude_never_writes_into_a_tracked_project_settings_file() {
+  local rec id=busy-cl-3 out state settings launch_log before after
+  rec=$(make_spawn_case claude-tracked claude "$id" seed_tracked_claude_settings)
+  read_case_record "$rec"
+  before=$(cat "$WT_DIR/.claude/settings.local.json")
+
+  launch_log="$CASE_DIR/launch.log"
+  out=$(FM_FAKE_LAUNCH_LOG="$launch_log" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+  state="$HOME_DIR/state"
+
+  after=$(cat "$WT_DIR/.claude/settings.local.json")
+  [ "$before" = "$after" ] \
+    || fail "the spawn overwrote the project's tracked settings file: $after"
+  [ -z "$(git -C "$WT_DIR" status --porcelain)" ] \
+    || fail "the spawn left the worktree dirty: $(git -C "$WT_DIR" status --porcelain)"
+
+  settings="$state/$id.claude-settings.json"
+  assert_present "$settings" "claude hooks must be written outside the worktree"
+  jq -e '.hooks.Stop' "$settings" >/dev/null || fail "the state-resident hooks lack Stop"
+  assert_grep "--settings" "$launch_log" \
+    "the launch must load the state-resident hooks by path"
+  assert_grep "$id.claude-settings.json" "$launch_log" \
+    "the launch must name this task's own hook settings"
+
+  # The hooks still drive the real busy contract from their new home.
+  run_claude_hook "$settings" Stop || fail "Stop hook command failed"
+  [ -f "$state/$id.turn-ended" ] || fail "Stop no longer touches the notification marker"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "idle claude-hook" ] || fail "Stop must classify 'idle claude-hook', got '$out'"
+  pass "a claude spawn leaves a tracked .claude/settings.local.json untouched and hooks from state/"
 }
 
 test_codex_unverified_until_a_semantic_source_exists() {
@@ -349,6 +413,7 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_claude_never_writes_into_a_tracked_project_settings_file
 test_codex_unverified_until_a_semantic_source_exists
 
 echo "all fm-busy-adapter-wiring tests passed"

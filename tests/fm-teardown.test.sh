@@ -931,6 +931,142 @@ test_dirty_worktree_refuses() {
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
 }
 
+test_legacy_untracked_claude_hook_file_is_cleaned_up() {
+  local case_dir rc pr_head
+  case_dir=$(make_case legacy-claude-hook)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  # What a pre-upgrade firstmate left behind: its own hook file, untracked.
+  mkdir -p "$case_dir/wt/.claude"
+  printf '{"hooks":{"Stop":[]}}\n' > "$case_dir/wt/.claude/settings.local.json"
+  printf '.claude/settings.local.json\n' \
+    >> "$(git -C "$case_dir/wt" rev-parse --git-path info/exclude)"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "legacy-hook: teardown should succeed: $(cat "$case_dir/stderr")"
+  [ ! -e "$case_dir/wt/.claude/settings.local.json" ] \
+    || fail "legacy-hook: firstmate's own untracked leftover should be cleaned up"
+  pass "a pre-upgrade untracked claude hook file is cleaned up at teardown"
+}
+
+test_legacy_cleanup_never_deletes_a_tracked_settings_file() {
+  local case_dir rc pr_head before
+  case_dir=$(make_case legacy-claude-hook-tracked)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  # Same path, but this project versions it. It is the project's file, so the
+  # cleanup above must leave it alone even though the path matches.
+  mkdir -p "$case_dir/wt/.claude"
+  printf '{"permissions":{"allow":["Bash(npm test:*)"]}}\n' \
+    > "$case_dir/wt/.claude/settings.local.json"
+  git -C "$case_dir/wt" add -f .claude/settings.local.json
+  git -C "$case_dir/wt" -c user.name=t -c user.email=t@e commit -qm "track permissions"
+  before=$(cat "$case_dir/wt/.claude/settings.local.json")
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "tracked-legacy: teardown should succeed: $(cat "$case_dir/stderr")"
+  [ -f "$case_dir/wt/.claude/settings.local.json" ] \
+    || fail "tracked-legacy: the project's own tracked settings file was deleted"
+  [ "$before" = "$(cat "$case_dir/wt/.claude/settings.local.json")" ] \
+    || fail "tracked-legacy: the project's own tracked settings file was modified"
+  pass "the legacy cleanup never deletes a TRACKED .claude/settings.local.json"
+}
+
+test_agent_authored_file_under_dot_claude_still_refuses() {
+  local case_dir rc pr_head
+  case_dir=$(make_case claude-dir-not-disowned)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  # Firstmate no longer writes anything under the worktree's .claude/, so a file
+  # there is the agent's own work product and must be able to refuse teardown.
+  mkdir -p "$case_dir/wt/.claude/agents"
+  printf 'agent the crew wrote\n' > "$case_dir/wt/.claude/agents/reviewer.md"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "claude-dir: teardown must not disown a file the agent wrote under .claude/"
+  grep -q REFUSED "$case_dir/stderr" || fail "claude-dir: no REFUSED line in stderr"
+  grep -q "uncommitted changes" "$case_dir/stderr" \
+    || fail "claude-dir: refusal did not cite uncommitted changes"
+  pass "a file the agent wrote under .claude/ still refuses teardown"
+}
+
+test_tracked_settings_modification_refuses() {
+  local case_dir rc pr_head
+  case_dir=$(make_case claude-settings-tracked)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  # A project may TRACK .claude/settings.local.json to version its own tool
+  # permissions. Whoever modified it, that is the project's file, never
+  # firstmate's to discard.
+  mkdir -p "$case_dir/wt/.claude"
+  printf '{"permissions":{"allow":["Bash(npm test:*)"]}}\n' \
+    > "$case_dir/wt/.claude/settings.local.json"
+  git -C "$case_dir/wt" add -f .claude/settings.local.json
+  git -C "$case_dir/wt" -c user.name=t -c user.email=t@e commit -qm "track permissions"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  printf '{"hooks":{}}\n' > "$case_dir/wt/.claude/settings.local.json"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "tracked-settings: a modified tracked settings file must refuse teardown"
+  grep -q "uncommitted changes" "$case_dir/stderr" \
+    || fail "tracked-settings: refusal did not cite uncommitted changes"
+  pass "a modified TRACKED .claude/settings.local.json refuses teardown"
+}
+
+test_firstmate_turnend_pointers_are_still_disowned() {
+  local case_dir rc pr_head
+  case_dir=$(make_case turnend-pointers-disowned)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  # These two ARE firstmate's own per-task pointers, so they must not be mistaken
+  # for the crew's unlanded work.
+  printf 'token=fm.aaaaaaaaaaaa\n' > "$case_dir/wt/.fm-grok-turnend"
+  printf 'token=fm.bbbbbbbbbbbb\n' > "$case_dir/wt/.fm-kimi-turnend"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "turnend-pointers: firstmate's own pointers must not block teardown: $(cat "$case_dir/stderr")"
+  pass "firstmate's own untracked turn-end pointers are still disowned"
+}
+
 test_gh_error_and_content_absent_refuses() {
   local case_dir rc
   case_dir=$(make_case gh-error)
@@ -2621,6 +2757,11 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_agent_authored_file_under_dot_claude_still_refuses
+test_legacy_untracked_claude_hook_file_is_cleaned_up
+test_legacy_cleanup_never_deletes_a_tracked_settings_file
+test_tracked_settings_modification_refuses
+test_firstmate_turnend_pointers_are_still_disowned
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds
 test_live_index_lock_is_never_removed_and_teardown_refuses

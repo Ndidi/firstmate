@@ -1134,6 +1134,20 @@ teardown_treehouse_return() {
   return 1
 }
 
+# Removes a legacy <worktree>/.claude/settings.local.json that a PRE-UPGRADE
+# firstmate wrote as claude's hook file, so a reused pool worktree cannot load a
+# retired task's hooks alongside the current one. Claude's hooks now live in
+# state/<id>.claude-settings.json (bin/fm-spawn.sh owns why), so anything still at
+# the old path is either firstmate's own litter or the project's own versioned
+# file. Only the untracked case is firstmate's to remove; a tracked file belongs
+# to the project and is left exactly as it is.
+remove_legacy_claude_hook_file() {  # <worktree>
+  local wt=$1 legacy=$1/.claude/settings.local.json
+  [ -f "$legacy" ] || return 0
+  git -C "$wt" ls-files --error-unmatch -- .claude/settings.local.json >/dev/null 2>&1 && return 0
+  rm -f "$legacy"
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -1150,7 +1164,15 @@ validate_worktree_teardown_safety() {
     echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
     return 1
   fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  # Firstmate's own per-task pointers are not the crew's work, so they cannot
+  # count as unlanded work. Two rules keep that exclusion honest. It names exact
+  # files firstmate writes, never a directory, so a file an agent authored beside
+  # one is still work. And the `^?? ` anchor is git-porcelain for UNTRACKED, so a
+  # project that TRACKS one of these paths keeps its own file protected: firstmate
+  # only gets to disown a file the project itself does not version. Claude's hooks
+  # are not listed because they no longer live in the worktree at all
+  # (bin/fm-spawn.sh writes state/<id>.claude-settings.json and loads it by path).
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? \.fm-(grok|kimi)-turnend$' | head -1 || true)
 
   if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
     if worktree_safety_blocked_by_lock "commits not on a remote"; then
@@ -2226,15 +2248,17 @@ cleanup_firstmate_home_children() {
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
+        rm -f "$child_wt/.opencode/plugins/fm-turn-end.js" \
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+        remove_legacy_claude_hook_file "$child_wt"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
-      rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
+      rm -f "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+      remove_legacy_claude_hook_file "$child_wt"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
         if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
@@ -2260,6 +2284,7 @@ cleanup_firstmate_home_children() {
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
     rm -f "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
+      "$sub_state/$child_id.claude-settings.json" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session"
@@ -2420,9 +2445,10 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
         git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
       fi
     fi
-    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+    rm -f "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+    remove_legacy_claude_hook_file "$WT"
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
@@ -2434,8 +2460,9 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     fi
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+  rm -f "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+  remove_legacy_claude_hook_file "$WT"
   # Kills remaining processes in the worktree (including the agent), resets, returns
   # to pool. treehouse resolves the pool from the working directory, so run it from
   # the project. teardown_treehouse_return tolerates transient and stale git locks
@@ -2539,7 +2566,8 @@ remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
-  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
+  "$STATE/$ID.pi-ext.ts" "$STATE/$ID.claude-settings.json" \
+  "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \

@@ -185,9 +185,20 @@ The shared symptom is a healthy-looking pane with no work in progress, so each a
 | Fact | Value |
 |---|---|
 | Busy state | Owned lifecycle hooks: `UserPromptSubmit` opens a turn, while `Stop`, `StopFailure`, and `SessionEnd` close it; because Claude fires no hook for a manual interrupt, `bin/fm-control.sh interrupt` reports only delivered keys and the verified endpoint or live agent, publishes no idle event, makes no cancellation claim, and leaves adapter-observed state unchanged, so a mid-turn worker typically remains busy via `claude-hook`. |
+| Hook location | `state/<id>.claude-settings.json`, OUTSIDE the worktree, loaded with `--settings <path>` (see below). |
 | Exit command | `/exit` |
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
+
+**Hooks live outside the worktree (verified 2026-08-19, Claude Code 2.1.235).**
+Firstmate writes claude's per-task hooks to `state/<id>.claude-settings.json` and loads them with `--settings <path>`, the same shape pi's extension already uses.
+It does NOT write `<worktree>/.claude/settings.local.json`, because a project may legitimately TRACK that path to version its own pre-approved tool permissions; writing there replaced a tracked file no worker authored, which stranded cleanup on a dirty tracked file and left the project's whole permission allowlist one `git add -A` from being committed away.
+Two facts make the external path strictly better rather than merely safer.
+The four-event document loads and fires from a `--settings` file: `UserPromptSubmit`, `Stop`, and `SessionEnd` were each observed, and `StopFailure` is simply not triggered by a turn that succeeds.
+They fire even in an UNTRUSTED workspace, where a worktree-resident settings file has its entries dropped with a warning instead.
+The flag is only passed when that file exists, because claude treats an unreadable `--settings` path as a hard startup error and a secondmate launch arms no busy wiring.
+Cleanup removes a leftover `<worktree>/.claude/settings.local.json` from a pre-upgrade spawn only when it is UNTRACKED, so a reused pool worktree cannot load a retired task's hooks while a project's own versioned file is never deleted.
+`docs/verification/claude-settings.md` owns the commands and output; `bin/fm-spawn.sh` owns the mechanics.
 
 First launch in a fresh worktree, or first ever on a machine, may show a trust or bypass-permissions confirmation.
 After every spawn, peek the pane within about 20 seconds.
@@ -203,7 +214,7 @@ That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
 
 **Primary-session guard fact (verified 2026-07-04, Claude Code 2.1.201; preserved 2026-07-08, Claude Code 2.1.204; Stop-owned auto-arm revalidated 2026-07-24, Claude Code 2.1.219).**
-This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file in a task's own `.claude/settings.local.json`).
+This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file, from the task's own `state/<id>.claude-settings.json` outside the worktree).
 The firstmate PRIMARY's own `.claude/settings.json` registers two Stop hooks: `bin/fm-turnend-guard.sh --claude` and the Stop-owned auto-arm `bin/fm-claude-stop-autoarm.sh` (`asyncRewake: true`, `timeout: 28800`), and exiting the guard with status 2 plus stderr reliably forces the model to continue.
 Claude Code's stdin payload to a Stop hook carries a `stop_hook_active` boolean that is `true` when the current stop attempt follows ANY stop-hook-driven continuation, including `asyncRewake` rewakes; the primary guard therefore ignores it in `--claude` mode and uses the cooperative claim/epoch check plus a bounded re-block budget instead, while the codex-mode default still treats it as a one-block loop guard.
 A project-level `.claude/settings.json` only takes effect when Claude Code's project root is that exact directory - it does not walk up from a subdirectory looking for one, so firstmate launches the primary from the repo root.
@@ -536,7 +547,7 @@ Both halves of the fold are trusted with no opt-in: an open run reads `busy`, a 
 
 muse fans out to its own sub-agents, but worktree isolation is per-child and opt-in: `--subagent-worktree-isolation` is a compatibility flag whose capability "defaults on" while "omission stays shared", and no nested git worktree appeared in any verified lab run.
 Firstmate deliberately does NOT exclude any muse path from `fm-teardown.sh`'s uncommitted-work check.
-Firstmate writes `.claude/settings.local.json` itself, which is why that path is excluded for claude; it does not write muse's, so a nested muse worktree or leftover scratch is the agent's own work product and MUST be able to refuse teardown.
+Only exact, untracked files firstmate writes into a worktree are excluded there, and muse's are the agent's own work product, so a nested muse worktree or leftover scratch MUST be able to refuse teardown.
 A teardown refusal naming muse scratch is therefore correct behavior: inspect it rather than forcing past it.
 
 ### Maturity caveats
