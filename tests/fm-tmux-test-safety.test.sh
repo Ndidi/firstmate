@@ -206,7 +206,22 @@ printf '%s\n' \"\$FM_TMUX_ISOLATED_SOCKET\"
   pass "tmux-test-safety: the private socket is never tmux's default"
 }
 
+# The label becomes a socket name, and a socket name becomes a filename. A label
+# carrying path separators must not be able to aim the socket elsewhere.
+test_label_cannot_escape_the_socket_directory() {
+  local child="$TMP_ROOT/label.sh" out
+  write_child "$child" "
+tmux_isolate_or_fail '../../escape/attempt'
+printf '%s\n' \"\$FM_TMUX_ISOLATED_SOCKET\"
+"
+  out=$(bash "$child" 2>&1) || fail "the awkward-label child failed: $out"
+  assert_not_contains "$out" "/" "the socket name kept a path separator"
+  assert_not_contains "$out" ".." "the socket name kept a parent-directory hop"
+  pass "tmux-test-safety: a label cannot steer the socket out of its directory"
+}
+
 test_isolated_window_is_invisible_to_the_real_server
+test_label_cannot_escape_the_socket_directory
 test_failing_run_leaves_the_real_server_untouched
 test_interrupted_run_leaves_the_real_server_untouched
 test_isolation_that_does_not_take_effect_is_refused

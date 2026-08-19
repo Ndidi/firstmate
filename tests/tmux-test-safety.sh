@@ -108,6 +108,11 @@ tmux_isolate() {  # [label]
   [ -n "$real" ] || return 0
 
   shim=$(mktemp -d "${TMPDIR:-/tmp}/fm-tmux-isolate.XXXXXX") || return 1
+  # The label reaches tmux as a socket NAME, which becomes a filename under the
+  # socket directory. Reduce it to characters that cannot escape or confuse that
+  # path, so a careless label fails as a clear refusal rather than a puzzling
+  # tmux error - and can never point the socket somewhere else.
+  label=$(printf '%s' "$label" | tr -c 'A-Za-z0-9_-' '-')
   socket="fm-isolated-${label}-$$"
 
   cat > "$shim/tmux" <<SH
