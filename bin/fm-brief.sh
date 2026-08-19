@@ -6,8 +6,9 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only>
+#          {--requirement <path>|--scope-given} [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout {--requirement <path>|--scope-given} [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -36,6 +37,18 @@
 #                the configured merge authority approves, firstmate merges to local main
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
+# For ship and scout tasks, an explicit requirement source is REQUIRED, exactly as
+# --mode is: scope is decided at intake, never inferred here. Pass one of:
+#   --requirement <path>  the elicited requirement document this brief is built from,
+#                         normally data/<task-id>/requirement.md. It must exist and be
+#                         non-empty; the generated brief links its absolute path and
+#                         tells the worker the document is authoritative on scope.
+#   --scope-given         a declaration that the captain's request already carried
+#                         concrete scope, so no elicitation was due (a scoped request,
+#                         a bug fix, a mechanical change, a settled follow-up).
+# The two are mutually exclusive, and both are refused on a secondmate charter, which
+# is a standing domain rather than a task scope. The .agents/skills/requirement-elicitation
+# skill owns which case applies and how the document is produced.
 # The generated ship brief records the chosen mode as a fixed machine-readable
 # "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
 # to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
@@ -106,6 +119,9 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+REQUIREMENT=
+REQUIREMENT_SET=0
+SCOPE_GIVEN=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -115,6 +131,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      requirement) REQUIREMENT=$a; REQUIREMENT_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -127,6 +144,9 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --requirement) want_value=requirement ;;
+    --requirement=*) REQUIREMENT=${a#--requirement=}; REQUIREMENT_SET=1 ;;
+    --scope-given) SCOPE_GIVEN=1 ;;
     # yolo never reaches the worker: it is firstmate's approval authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -153,6 +173,43 @@ if [ "$KIND" = ship ]; then
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
+fi
+
+# Scope source is an explicit per-task decision, exactly like the delivery mode
+# above (AGENTS.md section 7; .agents/skills/requirement-elicitation). A scaffold
+# that guesses here produces the thin brief this guard exists to stop, so an
+# absent, doubled, or unusable requirement source refuses rather than defaults.
+REQUIREMENT_ABS=
+if [ "$KIND" = secondmate ]; then
+  if [ "$REQUIREMENT_SET" -eq 1 ] || [ "$SCOPE_GIVEN" -eq 1 ]; then
+    echo "error: --requirement and --scope-given apply only to ship and scout briefs; a secondmate charter is a standing domain, not a task scope" >&2
+    exit 1
+  fi
+else
+  if [ "$REQUIREMENT_SET" -eq 1 ] && [ "$SCOPE_GIVEN" -eq 1 ]; then
+    echo "error: pass either --requirement <path> or --scope-given, not both; a brief has one scope source" >&2
+    exit 1
+  fi
+  if [ "$REQUIREMENT_SET" -eq 0 ] && [ "$SCOPE_GIVEN" -eq 0 ]; then
+    echo "error: briefs require an explicit scope source: pass --requirement <path> when the scope was elicited with the captain (normally data/<task-id>/requirement.md), or --scope-given when the captain's request already carried concrete scope; load .agents/skills/requirement-elicitation to decide which applies" >&2
+    exit 1
+  fi
+  if [ "$REQUIREMENT_SET" -eq 1 ]; then
+    [ -n "$REQUIREMENT" ] || { echo "error: --requirement requires a path to the requirement document" >&2; exit 1; }
+    req_dir=$(CDPATH='' cd -- "$(dirname -- "$REQUIREMENT")" 2>/dev/null && pwd -P) || {
+      echo "error: --requirement path cannot be resolved: $REQUIREMENT" >&2
+      exit 1
+    }
+    REQUIREMENT_ABS="$req_dir/$(basename -- "$REQUIREMENT")"
+    [ -f "$REQUIREMENT_ABS" ] || {
+      echo "error: --requirement names no readable file: $REQUIREMENT (resolved to $REQUIREMENT_ABS); write the elicited requirement there before scaffolding" >&2
+      exit 1
+    }
+    [ -s "$REQUIREMENT_ABS" ] || {
+      echo "error: --requirement document is empty: $REQUIREMENT_ABS; an empty document is not an elicited scope" >&2
+      exit 1
+    }
+  fi
 fi
 ID=${POS[0]}
 
@@ -298,6 +355,21 @@ EOF
 HERDR_SECTION=${HERDR_SECTION%$'\n'}
 fi
 
+# With --scope-given this stays empty and the brief is byte-identical to one
+# scaffolded before this contract existed. With --requirement it links the
+# document and makes it authoritative on scope, so a worker meets the captain's
+# own answers rather than firstmate's summary of them.
+REQUIREMENT_SECTION=
+if [ -n "$REQUIREMENT_ABS" ]; then
+  IFS= read -r -d '' REQUIREMENT_SECTION <<EOF || true
+# Requirement
+This task's scope was established with the captain and recorded at \`$REQUIREMENT_ABS\`.
+Read it before you start and build against it: it is the record this work is judged against, and its out-of-scope section binds you as much as its acceptance criteria do.
+If it and the task above disagree on scope, the requirement document wins - append \`needs-decision:\` naming the conflict rather than choosing between them yourself.
+
+EOF
+fi
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -305,7 +377,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Task
 {TASK}
 
-$HERDR_SECTION
+${REQUIREMENT_SECTION}$HERDR_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
@@ -420,7 +492,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Task
 {TASK}
 
-$HERDR_SECTION
+${REQUIREMENT_SECTION}$HERDR_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.

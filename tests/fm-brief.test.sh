@@ -202,7 +202,7 @@ test_ship_modes_generate_clean_briefs() {
   for id_mode in "brief-nomistakes-a1:no-mistakes" "brief-directpr-a2:direct-PR" "brief-localonly-a3:local-only"; do
     id=${id_mode%%:*}
     mode=${id_mode##*:}
-    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1; status=$?
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" --scope-given >/dev/null 2>&1; status=$?
     expect_code 0 "$status" "fm-brief.sh $id --mode $mode should exit 0"
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
@@ -244,6 +244,108 @@ ROWS
   pass "fm-brief.sh: ship --mode is required and closed-set validated"
 }
 
+# Scope is decided at intake, never inferred by the scaffold
+# (.agents/skills/requirement-elicitation). A ship or scout brief must name where
+# its scope came from, so an absent, doubled, or unusable requirement source
+# refuses. The refusal has to name both flags, because a message that only says
+# "missing scope" leaves the caller guessing which case they are in.
+test_scope_source_is_required_and_validated() {
+  local home id out status label args expect req empty
+  home="$TMP_ROOT/scope-source-home"
+  mkdir -p "$home/data"
+  req="$home/requirement.md"
+  printf '# Requirement\nThe captain answered these questions.\n' > "$req"
+  empty="$home/empty.md"
+  : > "$empty"
+  id=0
+  while IFS='|' read -r label args expect; do
+    [ -n "$label" ] || continue
+    id=$((id + 1))
+    # shellcheck disable=SC2086  # args is an intentional word-split arg list
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "brief-scope-$id" some-proj $args 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$label: expected a non-zero exit"
+    assert_contains "$out" "$expect" "$label: refusal did not explain the contract"
+    assert_absent "$home/data/brief-scope-$id/brief.md" "$label: refused scaffold still wrote a brief"
+  done <<ROWS
+ship without a scope source|--mode local-only|briefs require an explicit scope source
+scout without a scope source|--scout|briefs require an explicit scope source
+both scope sources on a ship|--mode local-only --scope-given --requirement $req|not both
+both scope sources on a scout|--scout --scope-given --requirement $req|not both
+requirement naming no file|--mode local-only --requirement $home/absent.md|names no readable file
+requirement naming a directory|--mode local-only --requirement $home/data|names no readable file
+requirement document is empty|--mode local-only --requirement $empty|document is empty
+requirement path is unresolvable|--mode local-only --requirement $home/no/such/dir/requirement.md|cannot be resolved
+empty --requirement value|--mode local-only --requirement=|requires a path
+ROWS
+  pass "fm-brief.sh: a ship or scout brief requires exactly one usable scope source"
+}
+
+# A secondmate charter is a standing domain rather than a task scope, so the two
+# scope flags are refused there instead of being accepted and ignored - the same
+# treatment --mode already gets on that path.
+test_scope_flags_are_refused_on_a_charter() {
+  local home out status label args
+  home="$TMP_ROOT/scope-charter-home"
+  mkdir -p "$home/data"
+  for args in "--scope-given" "--requirement /dev/null"; do
+    # shellcheck disable=SC2086  # args is an intentional word-split arg list
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-scope-charter --secondmate --no-projects $args 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "charter carrying $args should exit non-zero"
+    assert_contains "$out" "apply only to ship and scout briefs" \
+      "charter refusal for $args did not explain why"
+  done
+  pass "fm-brief.sh: --requirement and --scope-given are refused on a secondmate charter"
+}
+
+# The point of eliciting a requirement is that the WORKER meets the captain's own
+# answers. A document that is elicited and then not linked has changed nothing, so
+# the generated brief must carry its absolute path and make it authoritative on
+# scope. --scope-given must add nothing at all: the not-firing case is the common
+# one and it must stay exactly as cheap as it was.
+test_requirement_document_reaches_the_brief() {
+  local home req linked plain
+  home="$TMP_ROOT/requirement-link-home"
+  mkdir -p "$home/data"
+  req="$home/data/requirement.md"
+  printf '# Requirement\nOut of scope: everything else.\n' > "$req"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-req-ship some-proj --mode local-only --requirement "$req" >/dev/null 2>&1 \
+    || fail "a ship brief with a valid requirement should scaffold"
+  linked="$home/data/brief-req-ship/brief.md"
+  assert_grep "$req" "$linked" "ship brief did not link the requirement document's absolute path"
+  assert_grep "record this work is judged against" "$linked" \
+    "ship brief did not say the requirement is the record the work is judged against"
+  assert_grep "out-of-scope section binds you" "$linked" \
+    "ship brief did not bind the worker to the document's out-of-scope boundary"
+  assert_grep "the requirement document wins" "$linked" \
+    "ship brief did not make the requirement authoritative on a scope conflict"
+  # A conflict is a decision above the implementation worker, so the brief must
+  # route it rather than let the worker pick a side quietly.
+  assert_grep "needs-decision" "$linked" \
+    "ship brief did not route a scope conflict back through firstmate"
+
+  # A relative path resolves against the caller's working directory and still
+  # lands in the brief as an absolute path the worker can open from anywhere.
+  ( cd "$home/data" && FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-req-rel some-proj --mode local-only --requirement requirement.md >/dev/null 2>&1 ) \
+    || fail "a relative --requirement path should resolve against the caller's cwd"
+  assert_grep "$req" "$home/data/brief-req-rel/brief.md" \
+    "relative --requirement was not rendered as an absolute path"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-req-scout some-proj --scout --requirement "$req" >/dev/null 2>&1 \
+    || fail "a scout brief with a valid requirement should scaffold"
+  assert_grep "$req" "$home/data/brief-req-scout/brief.md" \
+    "scout brief did not link the requirement document"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-req-none some-proj --mode local-only --scope-given >/dev/null 2>&1 \
+    || fail "a ship brief with --scope-given should scaffold"
+  plain="$home/data/brief-req-none/brief.md"
+  assert_no_grep "# Requirement" "$plain" "--scope-given brief grew a requirement section it has no document for"
+  assert_no_grep "requirement document wins" "$plain" "--scope-given brief claimed a requirement that does not exist"
+  pass "fm-brief.sh: --requirement links the document into the brief and --scope-given adds nothing"
+}
+
 # The registry is the captain's standing posture, not this task's answer: the
 # scaffold must follow the explicit flag even when the project is registered
 # with a different mode, and must not consult the registry at all.
@@ -251,7 +353,7 @@ test_ship_mode_is_explicit_not_registry() {
   local home brief
   home="$TMP_ROOT/explicit-over-registry-home"
   write_registry "$home"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a5 direct-proj --mode no-mistakes >/dev/null 2>&1 \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a5 direct-proj --mode no-mistakes --scope-given >/dev/null 2>&1 \
     || fail "explicit no-mistakes brief on a direct-PR project should scaffold"
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
@@ -260,7 +362,7 @@ test_ship_mode_is_explicit_not_registry() {
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only --scope-given >/dev/null 2>&1 \
     || fail "unregistered project should still scaffold from the explicit mode"
   grep -qx "Delivery contract: mode=local-only" "$home/data/brief-explicit-a6/brief.md" \
     || fail "unregistered project did not honour the explicit --mode"
@@ -295,14 +397,14 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   home="$TMP_ROOT/configured-authority-home"
   write_registry "$home"
   id="brief-direct-authority-a4"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR --scope-given >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
     "direct-PR brief lost configured merge authority"
   assert_no_grep "The captain reviews and merges the PR" "$brief" \
     "direct-PR brief hard-coded captain-only authority"
   id="brief-local-authority-a4"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only --scope-given >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path." "$brief" \
     "local-only brief lost configured merge authority and guarded landing"
@@ -313,7 +415,7 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
     "local-only brief must not include the no-mistakes --intent contract"
   id="brief-direct-intent-a4"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR --scope-given >/dev/null 2>&1
   assert_no_grep "make \`--intent\` preserve all relevant content from this brief" "$home/data/$id/brief.md" \
     "direct-PR brief must not include the no-mistakes --intent contract"
   pass "fm-brief.sh: faster paths use configured authority without stacked review"
@@ -326,14 +428,14 @@ test_pr_body_tldr_contract() {
   home="$TMP_ROOT/tldr-home"
   mkdir -p "$home/data"
   id="brief-tldr-c1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR --scope-given >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_grep "Open the PR body with a short bullet TLDR before any detail" "$brief" \
     "direct-PR brief lost the PR-body TLDR contract"
   assert_grep "We introduced a launch-time isolation check to protect" "$brief" \
     "direct-PR TLDR contract lost its worked example"
   id="brief-tldr-c2"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --scope-given >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_grep "you cannot set that body's final shape from here" "$brief" \
     "no-mistakes brief must state the template limitation plainly"
@@ -342,7 +444,7 @@ test_pr_body_tldr_contract() {
   assert_no_grep "Open the PR body with a short bullet TLDR" "$brief" \
     "no-mistakes brief must not claim control of the pipeline-generated body"
   id="brief-tldr-c3"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only --scope-given >/dev/null 2>&1
   assert_no_grep "TLDR" "$home/data/$id/brief.md" \
     "local-only raises no PR and must not carry a PR-body contract"
   pass "fm-brief.sh: PR-raising modes carry the PR-body TLDR contract"
@@ -355,7 +457,7 @@ test_no_mistakes_dod_wording() {
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
   id="brief-wording-b1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --scope-given >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
@@ -388,7 +490,7 @@ test_ship_project_memory_wording() {
   home="$TMP_ROOT/project-memory-home"
   mkdir -p "$home/data"
   id="brief-memory-c1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --scope-given >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
@@ -405,7 +507,7 @@ test_herdr_lab_contract_is_explicit_and_complete() {
   home="$TMP_ROOT/herdr-lab-home"
   mkdir -p "$home/data"
   id="brief-herdr-lab-d1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --herdr-lab >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --herdr-lab --scope-given >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "Herdr lab brief was not scaffolded"
   assert_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
@@ -439,7 +541,7 @@ test_herdr_lab_contract_quotes_foreign_firstmate_path() {
   id="brief-herdr-lab-foreign-d2"
   helper=$(printf '%s' "$foreign_root/bin/fm-herdr-lab.sh" | sed "s/'/'\\\\''/g")
   helper="'$helper'"
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$foreign_root" "$ROOT/bin/fm-brief.sh" "$id" foreign --scout --herdr-lab >/dev/null 2>&1
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$foreign_root" "$ROOT/bin/fm-brief.sh" "$id" foreign --scout --herdr-lab --scope-given >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_grep "HERDR_LAB_HELPER=$helper" "$brief" \
     "Herdr lab brief must shell-quote an absolute Firstmate helper path"
@@ -455,9 +557,9 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   for kind in ship scout; do
     id="brief-herdr-gate-$kind"
     if [ "$kind" = scout ]; then
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --scope-given >/dev/null 2>&1
     else
-      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --scope-given >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
     assert_grep "# Herdr lifecycle declaration - NOT ENABLED" "$brief" \
@@ -650,7 +752,7 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
   local home brief status=0
   home="$TMP_ROOT/herdr-kind-home"
   mkdir -p "$home/data"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-scout firstmate --scout --herdr-lab >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-scout firstmate --scout --herdr-lab --scope-given >/dev/null 2>&1
   brief="$home/data/herdr-scout/brief.md"
   assert_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
     "scout --herdr-lab brief missing the contract"
@@ -672,11 +774,11 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     case "$kind" in
       ship)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
-          "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+          "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --scope-given >/dev/null 2>&1
         ;;
       scout)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
-          "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+          "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --scope-given >/dev/null 2>&1
         ;;
       secondmate)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
@@ -705,7 +807,7 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   home="$TMP_ROOT/decision-policy-home"
   mkdir -p "$home/data"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    "$ROOT/bin/fm-brief.sh" sample-investigation sample --scout >/dev/null 2>&1
+    "$ROOT/bin/fm-brief.sh" sample-investigation sample --scout --scope-given >/dev/null 2>&1
   scout="$home/data/sample-investigation/brief.md"
   assert_grep "$ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md" "$scout" \
     "scout brief did not load the unresolved-decision policy before done"
@@ -722,7 +824,7 @@ test_scout_and_secondmate_load_decision_hold_policy() {
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
-  FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-scout-q6 alpha --scout >/dev/null 2>&1 \
+  FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-scout-q6 alpha --scout --scope-given >/dev/null 2>&1 \
     || fail "fm-brief.sh scout scaffold exited non-zero"
   brief="$BRIEF_HOME/data/brief-scout-q6/brief.md"
   assert_present "$brief" "scout brief was not scaffolded"
@@ -747,6 +849,9 @@ test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
+test_scope_source_is_required_and_validated
+test_scope_flags_are_refused_on_a_charter
+test_requirement_document_reaches_the_brief
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording

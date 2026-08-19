@@ -1643,6 +1643,19 @@ else
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 
+# Unfilled-brief refusal, checked before any endpoint or worktree exists.
+# fm-brief.sh writes the task text as a bare `{TASK}` placeholder line for
+# firstmate to replace; launching one hands a worker a brief with no task in it.
+# The match is anchored to a WHOLE line on purpose: the un-enabled Herdr
+# declaration names `{TASK}` inline in its prose, so an unanchored match would
+# refuse every brief scaffolded without --herdr-lab. Every real placeholder
+# (ship and scout `# Task`, charter `# Charter` and `# Routing scope`) is a
+# line of its own, so the anchor loses no coverage.
+if grep -qFx '{TASK}' "$BRIEF"; then
+  echo "error: $BRIEF still carries the unfilled {TASK} placeholder; replace it with this task's description, acceptance criteria, and constraints before spawning" >&2
+  exit 1
+fi
+
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
     no-mistakes) echo 3 ;;
