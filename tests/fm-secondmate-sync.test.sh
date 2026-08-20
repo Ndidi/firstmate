@@ -403,8 +403,15 @@ test_bootstrap_sweep_nudges_only_instruction_change() {
   assert_contains "$info_line" "firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions." \
     "successful nudge report should include the exact message sent"
   assert_not_contains "$out" "NUDGE_SECONDMATES:" "successful nudge must not leave a firstmate action item"
-  assert_not_contains "$out" "sm-readme" "readme-only advance is not nudged"
-  assert_not_contains "$out" "sm-current" "already-current secondmate is not nudged"
+  # Scoped to nudge lines on purpose: bootstrap also emits an unrelated
+  # unclaimed-window fact for every fixture window, so matching the whole output
+  # for the id would fail on a run where the nudge behaviour is exactly right.
+  assert_not_contains "$out" "nudged fm-sm-readme" "readme-only advance is not nudged"
+  assert_not_contains "$out" "NUDGE_SECONDMATES: secondmate sm-readme" \
+    "readme-only advance leaves no nudge action item either"
+  assert_not_contains "$out" "nudged fm-sm-current" "already-current secondmate is not nudged"
+  assert_not_contains "$out" "NUDGE_SECONDMATES: secondmate sm-current" \
+    "an already-current secondmate leaves no nudge action item either"
   assert_contains "$(cat "$log")" "[fm-from-firstmate]" "nudge send should use the marked fm-send secondmate path"
   assert_contains "$(cat "$log")" "firstmate was updated to the latest - please re-read your AGENTS.md" \
     "nudge send should type the exact re-read message"
