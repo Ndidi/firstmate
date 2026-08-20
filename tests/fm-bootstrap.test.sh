@@ -511,7 +511,7 @@ SH
 }
 
 test_orca_backend_gates_orca_tool_only_when_selected() {
-  local case_dir fakebin out missing_orca
+  local case_dir fakebin out missing_orca bash_env
   missing_orca="MISSING: orca (install: brew install orca  # or the platform's package manager)"
 
   case_dir="$TMP_ROOT/orca-backend-selected"
@@ -519,7 +519,21 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
   printf '%s\n' orca > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+  # Hermetic: prove the gate with the Orca CLI genuinely absent, rather than
+  # trusting the machine not to have anything called `orca` on its PATH. GNOME
+  # ships an unrelated /usr/bin/orca - a screen reader - so this case passed on CI
+  # and failed on a desktop, which is the same absent-tool stub the missing-git
+  # case above already uses and for the same reason.
+  bash_env="$case_dir/bash_env.sh"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = orca ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = "$missing_orca" ] || fail "backend=orca should require only the Orca-specific missing tool, got: $out"
 
@@ -846,7 +860,19 @@ case "${1:-}" in
     esac
     ;;
   capture-pane) printf '❯\n' ;;
-  list-windows) printf '%s\n' fm-sm ;;
+  list-windows)
+    # Answer the format actually asked for, the way real tmux does. Callers use
+    # two shapes: "#{session_name}:#{window_name}" with -a, and a bare
+    # "#{window_name}" with -t <session>. The unowned-window check asks for the
+    # qualified form and matches it against state/<id>.meta's window= field, so a
+    # bare name here never matches "window=firstmate:fm-sm" and this home's own
+    # secondmate window reads as unclaimed - output on a run this case requires
+    # to be silent.
+    case "$*" in
+      *'#{session_name}:#{window_name}'*) printf '%s\n' firstmate:fm-sm ;;
+      *) printf '%s\n' fm-sm ;;
+    esac
+    ;;
 esac
 exit 0
 SH
