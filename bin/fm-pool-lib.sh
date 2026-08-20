@@ -133,26 +133,105 @@ fm_pool_assert_acquirable() {  # <dir> [<label>]
   return 0
 }
 
-# Pool directories that back the SAME repository, i.e. duplicates. Prints one
-# line per repository that owns more than one pool:
-#   <common-git-dir><TAB><pool-dir>,<pool-dir>[,...]
-# Grouping is by common git directory, so it identifies duplicates by object
-# store rather than by path spelling. A repository whose checkout was renamed or
-# re-cloned leaves an ORPHAN pool instead (fm_pool_backing_state below), which is
-# a different fault with a different remedy.
+# Lowercased copy of a path, for the one comparison below that folds letter case.
+fm_pool_lower() {  # <string>
+  printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]'
+}
+
+# The repository a pool's copies were made from, as "<how> <path>":
+#   resolved <common-git-dir>   git answered; the object store is on disk
+#   declared <repository-path>  git could not answer, but the copies' own .git
+#                               pointer names the repository they came from
+#   unknown                     neither could be determined
+#
+# The declared answer is the one that matters, and asking git alone is what went
+# wrong before: when a repository is renamed or removed, `git rev-parse` fails
+# outright, so a pool keyed only on git's answer drops out of every report. That
+# is how crucible-f0ba32 - two copies, on disk, named after a repository that had
+# been renamed - was absent from the duplicate report rather than named by it.
+fm_pool_repo_key() {  # <pool-dir>
+  local pool=${1:-} copy common pointer repo declared=
+  while IFS= read -r copy; do
+    [ -n "$copy" ] || continue
+    if common=$(fm_pool_common_dir "$copy"); then
+      printf 'resolved %s\n' "$common"
+      return 0
+    fi
+    # A pool copy is a linked worktree, so its .git is a file reading
+    # "gitdir: <repo>/.git/worktrees/<name>". That still names the repository
+    # when the repository is gone, which is exactly when git cannot.
+    [ -n "$declared" ] && continue
+    [ -f "$copy/.git" ] || continue
+    pointer=$(sed -n 's/^gitdir:[[:space:]]*//p' "$copy/.git" | head -1)
+    repo=${pointer%/worktrees/*}
+    [ -n "$pointer" ] && [ "$repo" != "$pointer" ] && declared=$repo
+  done < <(fm_pool_copies "$pool")
+  if [ -n "$declared" ]; then
+    printf 'declared %s\n' "$declared"
+    return 0
+  fi
+  printf 'unknown\n'
+}
+
+# Every pool under the root with the repository it belongs to, one line per pool:
+#   <pool-dir><TAB><state><TAB><repository>
+# state is `present` when that repository is on disk, `stranded` when the pool
+# names a repository that is not there, and `unknown` when neither could be read.
+#
+# A stranded pool KEEPS the repository it names, so it still groups with the live
+# pool for that repository instead of disappearing from the inventory. Letter
+# case is folded for a stranded pool only, and only against a repository that is
+# present: renaming a checkout's directory case (projects/crucible ->
+# projects/Crucible) strands the old pool at a path that no longer exists, so it
+# cannot be some other live repository. Two repositories that both exist are
+# never folded together, however they are spelled.
+fm_pool_inventory() {
+  local pool answer i j
+  local -a pools=() states=() repos=()
+  while IFS= read -r pool; do
+    [ -n "$pool" ] || continue
+    answer=$(fm_pool_repo_key "$pool")
+    pools+=("$pool")
+    case "$answer" in
+      'resolved '*) states+=(present);  repos+=("${answer#resolved }") ;;
+      'declared '*) states+=(stranded); repos+=("${answer#declared }") ;;
+      *)            states+=(unknown);  repos+=("") ;;
+    esac
+  done < <(fm_pool_dirs)
+
+  for i in ${pools+"${!pools[@]}"}; do
+    [ "${states[$i]}" = stranded ] || continue
+    for j in ${pools+"${!pools[@]}"}; do
+      [ "${states[$j]}" = present ] || continue
+      [ "$(fm_pool_lower "${repos[$i]}")" = "$(fm_pool_lower "${repos[$j]}")" ] || continue
+      repos[i]=${repos[$j]}
+      break
+    done
+  done
+
+  for i in ${pools+"${!pools[@]}"}; do
+    printf '%s\t%s\t%s\n' "${pools[$i]}" "${states[$i]}" "${repos[$i]}"
+  done
+}
+
+# Repositories that own more than one pool, i.e. duplicates. One line each:
+#   <repository><TAB><pool-dir>,<pool-dir>[,...]
+# Grouping is by repository rather than by path spelling, and it includes a
+# stranded pool, so the pair this fleet actually had - a live pool and the one a
+# directory rename stranded beside it - reads as the single finding it is.
 fm_pool_duplicate_dirs() {
-  local pool copy common
-  {
-    while IFS= read -r pool; do
-      [ -n "$pool" ] || continue
-      copy=$(fm_pool_copies "$pool" | head -1)
-      [ -n "$copy" ] || continue
-      common=$(fm_pool_common_dir "$copy") || continue
-      printf '%s\t%s\n' "$common" "$pool"
-    done < <(fm_pool_dirs)
-  } | LC_ALL=C sort | awk -F'\t' '
-    { if ($1 == key) { list = list "," $2; n++ } else { if (n > 1) print key "\t" list; key = $1; list = $2; n = 1 } }
-    END { if (n > 1) print key "\t" list }
+  fm_pool_inventory | fm_pool_duplicates_from_inventory
+}
+
+# The grouping itself, over an inventory on stdin, so a caller that already holds
+# one does not walk the disk a second time to ask this question.
+fm_pool_duplicates_from_inventory() {
+  awk -F'\t' '
+    $3 != "" {
+      if ($3 in members) { members[$3] = members[$3] "," $1; count[$3]++ }
+      else { members[$3] = $1; count[$3] = 1; order[++n] = $3 }
+    }
+    END { for (i = 1; i <= n; i++) if (count[order[i]] > 1) print order[i] "\t" members[order[i]] }
   '
 }
 

@@ -90,6 +90,36 @@ write_status() {  # <status-file> <copy>...
   printf ']\n' >> "$out"
 }
 
+# A SECOND pool for a project that already has one, the way a worker acquiring a
+# copy from inside another copy seeds one. Same repository, different pool.
+add_second_pool() {  # <case-dir> <project> <suffix> <n>
+  local base=$1 project=$2 suffix=$3 n=$4 repo pool i
+  repo="$base/projects/$project"
+  pool="$base/pool/$project-$suffix"
+  mkdir -p "$pool"
+  for i in $(seq 1 "$n"); do
+    mkdir -p "$pool/$i"
+    git -C "$repo" worktree add --quiet --detach "$pool/$i/$project"
+  done
+  printf '%s\n' "$pool"
+}
+
+# Report treehouse's own word for one copy, for the states it has besides
+# `available` - `dirty` being the one this fleet actually produces.
+set_copy_status() {  # <status-file> <copy> <status>
+  local tmp
+  tmp="$1.tmp"
+  jq --arg p "$2" --arg s "$3" 'map(if .path == $p then .status = $s else . end)' "$1" > "$tmp"
+  mv "$tmp" "$1"
+}
+
+# The body of one report section: everything indented under a heading, stopping
+# at the next unindented line. Used to assert on a section rather than on the
+# whole report, so a name appearing somewhere else cannot satisfy the case.
+section_under() {  # <output> <heading>
+  printf '%s\n' "$1" | awk -v h="$2" 'index($0, h) == 1 { f = 1; next } f && /^[^ ]/ { exit } f'
+}
+
 # Backdate a copy past the settling window. Inner files first, so touching them
 # cannot bump the directory mtime afterwards.
 age_copy() {  # <copy> <days>
@@ -128,6 +158,122 @@ run_reap() {  # <case-dir> [args...]
     "$ROOT/bin/fm-pool-reap.sh" "$@" 2>&1
 }
 
+# --- the report accounts for every pool, not just every copy ----------------
+
+test_the_duplicate_finding_names_every_pool_in_the_group() {
+  local dir pool second out group
+  dir=$(new_case duplicate-report); pool=$(make_pool "$dir" alpha 1)
+  second=$(add_second_pool "$dir" alpha ffffff 1)
+  # treehouse answers for exactly one pool per repository, so the status covers
+  # the first and never mentions the second. That is the real arrangement, and
+  # the second pool is the one a report that drops its last member loses.
+  write_status "$dir/status.json" "$pool/1/alpha"
+  age_copy "$pool/1/alpha" 5
+  age_copy "$second/1/alpha" 5
+
+  out=$(run_reap "$dir" --dry-run)
+  group=$(section_under "$out" "One repository holding more than one pool:")
+  assert_contains "$group" "$(basename "$pool")" \
+    "the finding names the pool treehouse serves"
+  assert_contains "$group" "$(basename "$second")" \
+    "a heading that promises more than one pool must list more than one"
+  pass "a repository with two pools has both of them named under the duplicate heading"
+}
+
+test_a_pool_treehouse_will_not_serve_is_refused_as_a_duplicate_not_as_unknown() {
+  local dir pool second out
+  dir=$(new_case unserved); pool=$(make_pool "$dir" alpha 1)
+  second=$(add_second_pool "$dir" alpha ffffff 2)
+  write_status "$dir/status.json" "$pool/1/alpha"
+  local i; for i in 1 2; do age_copy "$second/$i/alpha" 9; done
+
+  out=$(run_reap "$dir" --reserve 0)
+
+  [ -d "$second/1/alpha" ] || fail "a pool that cannot be read must not be swept: $out"
+  [ -d "$second/2/alpha" ] || fail "a pool that cannot be read must not be swept: $out"
+  # The reason has to be the true one. treehouse accounts for these copies
+  # perfectly well - it simply will not hand them out - and saying otherwise sent
+  # an operator looking for a fault that was not there.
+  assert_contains "$out" "second pool for one repository" \
+    "the refusal says what is actually wrong with the pool"
+  assert_not_contains "$out" "treehouse does not account for it" \
+    "a pool treehouse knows about is never reported as one it does not know about"
+  pass "a second pool for one repository is refused as a duplicate rather than as an unknown state"
+}
+
+test_an_uncovered_pool_with_no_sibling_is_not_blamed_on_a_duplicate() {
+  local dir pool out
+  dir=$(new_case uncovered-alone); pool=$(make_pool "$dir" alpha 2)
+  # A readable status that simply does not mention this pool, and no second pool
+  # anywhere to explain it. Calling that "a second pool for one repository" would
+  # be a guess dressed as a reason, which is the failure this whole section exists
+  # to avoid; the run has to report what it actually saw.
+  printf '[]\n' > "$dir/status.json"
+  local i; for i in 1 2; do age_copy "$pool/$i/alpha" 9; done
+
+  out=$(run_reap "$dir" --reserve 0)
+
+  [ -d "$pool/1/alpha" ] || fail "a pool that cannot be read must not be swept: $out"
+  assert_contains "$out" "did not report this pool" "the refusal says exactly what was observed"
+  assert_not_contains "$out" "second pool for one repository" \
+    "a pool with no sibling is never blamed on a duplicate that does not exist"
+  pass "a pool treehouse did not report, with no sibling to explain it, is refused for that and nothing more"
+}
+
+test_every_pool_is_accounted_for_including_one_that_was_left_alone() {
+  local dir alpha beta out ledger
+  dir=$(new_case ledger); alpha=$(make_pool "$dir" alpha 2); beta=$(make_pool "$dir" beta 1)
+  write_status "$dir/status.json" "$alpha"/{1,2}/alpha "$beta/1/beta"
+  local i; for i in 1 2; do age_copy "$alpha/$i/alpha" 9; done
+  rm -rf "$dir/projects/beta"
+
+  out=$(run_reap "$dir" --dry-run)
+  ledger=$(section_under "$out" "Pools - every pool of isolated copies")
+  assert_contains "$ledger" "$(basename "$alpha")" "a pool that was swept is accounted for"
+  assert_contains "$ledger" "$(basename "$beta")" "a pool that was left alone is accounted for"
+  # An orphan that is simply absent from the report reads exactly like a pool that
+  # was never examined. It has to say which it is.
+  assert_contains "$ledger" "stranded" "a pool whose repository is gone says so out loud"
+  pass "every pool appears in the report with its state, so one left alone is not mistaken for one never examined"
+}
+
+test_a_copy_treehouse_calls_dirty_is_refused_for_being_dirty() {
+  local dir pool out
+  dir=$(new_case dirty-status); pool=$(make_pool "$dir" alpha 2)
+  write_status "$dir/status.json" "$pool"/{1,2}/alpha
+  local i; for i in 1 2; do age_copy "$pool/$i/alpha" 9; done
+  printf 'work in progress\n' > "$pool/1/alpha/README.md"
+  # `dirty` is a state treehouse reports, not the absence of one. Answering it
+  # with "treehouse does not account for it" was false, and it hid the only fact
+  # that mattered: the copy holds uncommitted work.
+  set_copy_status "$dir/status.json" "$pool/1/alpha" dirty
+
+  out=$(run_reap "$dir" --reserve 0)
+
+  [ -f "$pool/1/alpha/README.md" ] || fail "a dirty copy must be left alone: $out"
+  assert_contains "$out" "uncommitted changes" "the refusal names the work that is actually there"
+  assert_not_contains "$out" "treehouse does not account for it" \
+    "a state treehouse reports is never reported as a state it does not have"
+  pass "a copy treehouse calls dirty is refused for holding uncommitted work, in those words"
+}
+
+test_a_status_this_sweep_cannot_judge_is_named_rather_than_bucketed() {
+  local dir pool out
+  dir=$(new_case odd-status); pool=$(make_pool "$dir" alpha 2)
+  write_status "$dir/status.json" "$pool"/{1,2}/alpha
+  local i; for i in 1 2; do age_copy "$pool/$i/alpha" 9; done
+  set_copy_status "$dir/status.json" "$pool/1/alpha" quarantined
+
+  out=$(run_reap "$dir" --reserve 0)
+
+  [ -d "$pool/1/alpha" ] || fail "an unrecognized state must refuse, not reclaim: $out"
+  # A treehouse that grows a new status must make this sweep say so, not quietly
+  # fold the new word into an existing bucket and carry on.
+  assert_contains "$out" "quarantined" "the refusal quotes the state treehouse actually reported"
+  pass "a status this sweep does not recognize is refused with that status named"
+}
+
+
 # --- policy -----------------------------------------------------------------
 
 test_reduces_to_reserve_and_names_every_copy() {
@@ -139,13 +285,16 @@ test_reduces_to_reserve_and_names_every_copy() {
   out=$(run_reap "$dir")
 
   local left; left=$(count_copies "$pool")
-  [ "$left" = 1 ] || fail "reserve 1 should leave one copy, found $left: $out"
-  assert_contains "$out" "3 reclaimed" "the summary counts what it removed"
-  for i in 1 2 3; do
+  # Two, which is the built-in reserve: enough that a burst's first pair of
+  # workers starts without waiting for a dependency install.
+  [ "$left" = 2 ] || fail "the default reserve should leave two copies, found $left: $out"
+  assert_contains "$out" "2 reclaimed" "the summary counts what it removed"
+  for i in 1 2; do
     assert_contains "$out" "$pool/$i/alpha" "the report names reclaimed copy $i"
   done
-  # Oldest-idle first: copy 1 is the stalest, copy 4 the freshest, so 4 survives.
-  [ -d "$pool/4/alpha" ] || fail "the freshest copy should be the one kept warm: $out"
+  # Oldest-idle first: copy 1 is the stalest, copy 4 the freshest, so 3 and 4 survive.
+  [ -d "$pool/4/alpha" ] || fail "the freshest copy should be one of those kept warm: $out"
+  [ -d "$pool/3/alpha" ] || fail "the second freshest copy should be kept warm too: $out"
   pass "an idle pool is reduced to the reserve, and the report names every copy reclaimed"
 }
 
@@ -195,7 +344,7 @@ test_recently_used_copies_wait_out_the_settling_window() {
 
   out=$(run_reap "$dir" --min-idle-hours 0)
   left=$(count_copies "$pool")
-  [ "$left" = 1 ] || fail "--min-idle-hours 0 should let the sweep proceed, found $left: $out"
+  [ "$left" = 2 ] || fail "--min-idle-hours 0 should let the sweep proceed, found $left: $out"
   pass "a copy used more recently than the idle window is kept, and the window is configurable"
 }
 
@@ -520,6 +669,12 @@ test_json_report_accounts_for_every_copy() {
   pass "the JSON report accounts for every copy, refusals included"
 }
 
+test_the_duplicate_finding_names_every_pool_in_the_group
+test_a_pool_treehouse_will_not_serve_is_refused_as_a_duplicate_not_as_unknown
+test_every_pool_is_accounted_for_including_one_that_was_left_alone
+test_an_uncovered_pool_with_no_sibling_is_not_blamed_on_a_duplicate
+test_a_copy_treehouse_calls_dirty_is_refused_for_being_dirty
+test_a_status_this_sweep_cannot_judge_is_named_rather_than_bucketed
 test_reduces_to_reserve_and_names_every_copy
 test_reserve_is_configurable_and_defaults_need_no_config
 test_malformed_config_is_refused_not_silently_defaulted

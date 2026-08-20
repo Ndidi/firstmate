@@ -86,15 +86,34 @@
 #
 # ══ THE POLICY ════════════════════════════════════════════════════════════════
 #
-# WARM RESERVE, default 1 per project. Not nought: a fresh copy pays a full
+# WARM RESERVE, default 2 per project. Not nought: a fresh copy pays a full
 # dependency install before the next worker can start, and that cost lands on
 # every dispatch. Not sixteen: each extra warm copy costs a whole dependency tree
-# (about 2 GB per copy on the largest project here) to save install time on a
-# CONCURRENT second dispatch, which is far rarer than a serial next one. One warm
-# copy makes the common case - the next single dispatch - instant, and lets a
-# genuine fan-out grow the pool again on demand. The reserve counts only copies
-# that are actually available for reuse; a copy that is in use or refused cannot
-# be handed to a worker, so it is never counted as warm.
+# for as long as the project exists - about 575 MB a copy on the largest pool in
+# this fleet and about 2 GB a copy on the most expensive project.
+#
+# Two rather than one, because this fleet dispatches in bursts. The lifecycle
+# tells firstmate to send independent work out immediately with no concurrency
+# cap, so a cold project's next event is frequently a pair of workers rather than
+# a single one, and one warm copy covers only the first of them.
+#
+# WHAT THE FIRST DISPATCHES AFTER A SWEEP COST, stated plainly rather than hidden
+# behind the number: the first two workers onto a freshly swept project start at
+# once; each ADDITIONAL concurrent worker in that same burst waits for a new copy
+# plus one full dependency install before it can begin. That is paid once per
+# extra worker, not once per task, and the pool keeps what it grows until those
+# copies go idle again. A project that routinely fans out wider than two is
+# exactly what the per-project `<project> = <n>` line in config/pool-reserve is
+# for; raising it trades disk for the start-up time of a burst.
+#
+# The settling window below, not the reserve, is what protects a BUSY project.
+# Every copy touched inside that window is held whatever the reserve says, so an
+# active project is never swept down behind a running fleet. The reserve governs
+# only how many COLD copies survive.
+#
+# The reserve counts only copies that are actually available for reuse; a copy
+# that is in use or refused cannot be handed to a worker, so it is never counted
+# as warm.
 #
 # MINIMUM IDLE AGE, default 24 hours. A copy is reclaimed only once it has been
 # untouched for that long. This is deliberate slack against races the durable
@@ -105,6 +124,28 @@
 #
 # ORDER. Beyond the reserve, oldest-idle first: the least likely to be wanted
 # next goes first, and the warm copies that remain are the most recently prepared.
+#
+# ══ WHICH POOLS CAN BE SWEPT AT ALL ═══════════════════════════════════════════
+#
+# `treehouse status` reports exactly ONE pool per repository: the canonical one it
+# derives from that repository's own git metadata. Verified against treehouse
+# v2.1.1 - asked from inside a copy of a SECOND pool, status still answers for the
+# canonical one, so there is no directory anywhere from which a second pool's
+# copies appear. A repository with two pools on disk therefore always has one
+# whose per-copy state cannot be read.
+#
+# So this sweep checks, per pool, whether the status it loaded actually covers
+# that pool, and says so when it does not. Reporting those copies as "treehouse
+# does not account for it" was false: treehouse accounts for them perfectly well -
+# `prune --all` lists them and `destroy <path>` classifies them - it simply will
+# not SERVE them. Nothing can ever be handed out of a second pool again, so it is
+# disk the fleet cannot use, and consolidating it is the remedy rather than
+# reaping it one copy at a time.
+#
+# A stranded pool, whose repository was renamed or removed, cannot be checked
+# against any branch at all, so every copy in it is refused. Both kinds are named
+# in the pool ledger the report prints, so a pool that was looked at and left
+# alone never reads the same as one that was never looked at.
 #
 # ══ WHEN IT RUNS ══════════════════════════════════════════════════════════════
 #
@@ -170,7 +211,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
-DEFAULT_RESERVE=1
+DEFAULT_RESERVE=2
 DEFAULT_MIN_IDLE_HOURS=24
 
 OPT_PROJECT=
@@ -403,8 +444,22 @@ load_pool_status() {  # <primary-checkout>
   printf '%s' "$TH_STATUS_JSON" | jq -e 'type == "array"' >/dev/null 2>&1
 }
 
-# "in-use", "available", or empty when treehouse does not know this path. Empty is
-# never read as safe: the caller refuses a copy treehouse cannot account for.
+# Does the status just loaded actually describe THIS pool? treehouse serves one
+# pool per repository - the canonical one it derives from that repository's git
+# metadata - so a second pool on disk appears in NO status output, from any
+# directory. Without this check every copy in such a pool was refused as
+# unaccounted for, which was not true of treehouse and not useful to an operator.
+pool_status_covers() {  # <pool-dir>
+  [ -n "$TH_STATUS_JSON" ] || return 1
+  printf '%s' "$TH_STATUS_JSON" \
+    | jq -e --arg p "$1/" 'any(.[]; (.path // "") | startswith($p))' >/dev/null 2>&1
+}
+
+# treehouse's own word for this copy - "in-use" when a process or lease holds it,
+# otherwise its reported status verbatim ("available", "dirty", ...) - or empty
+# when this path is absent from the status output. Empty is never read as safe,
+# and a status this script does not recognize is never read as safe either: both
+# refuse, and the caller says which of the two it was.
 status_of_copy() {  # <copy>
   local copy=$1
   [ -n "$TH_STATUS_JSON" ] || return 1
@@ -535,6 +590,48 @@ record() {  # <pool> <path> <outcome> <detail>
   REPORT_POOL+=("$1"); REPORT_PATH+=("$2"); REPORT_OUTCOME+=("$3"); REPORT_DETAIL+=("$4")
 }
 
+# Paths as treehouse prints them: a pool root under $HOME reads as ~, which keeps
+# a report of several copies scannable instead of wrapping on a shared prefix.
+display_path() {  # <path>
+  case "${1:-}" in
+    "$HOME"/*) printf '~%s\n' "${1#"$HOME"}" ;;
+    *) printf '%s\n' "${1:-}" ;;
+  esac
+}
+
+# The ledger: one row per pool the sweep looked at, whatever came of it. Its whole
+# job is that a pool which was examined and left alone never reads the same as one
+# that was never examined at all - the difference an earlier report could not show.
+POOL_LEDGER_DIR=()
+POOL_LEDGER_STATE=()
+POOL_LEDGER_NOTE=()
+
+# Copies a pool holds right now. Counted when the report is written rather than
+# when the pool was examined, so the ledger describes the disk as the run LEAVES
+# it instead of as it found it.
+pool_copy_count() {  # <pool-dir>
+  fm_pool_copies "$1" | grep -c . || true
+}
+
+# The ledger's verdict for one pool, for a second mention of it elsewhere in the
+# report. "unswept" when the sweep never reached it, which a project filter can do.
+ledger_state_of() {  # <pool-dir>
+  local i
+  for i in ${POOL_LEDGER_DIR+"${!POOL_LEDGER_DIR[@]}"}; do
+    if [ "${POOL_LEDGER_DIR[$i]}" = "$1" ]; then
+      printf '%s\n' "${POOL_LEDGER_STATE[$i]}"
+      return 0
+    fi
+  done
+  printf 'unswept\n'
+}
+
+record_pool() {  # <pool-dir> <state> <note>
+  POOL_LEDGER_DIR+=("$1")
+  POOL_LEDGER_STATE+=("$2")
+  POOL_LEDGER_NOTE+=("$3")
+}
+
 RECLAIMED=0
 REFUSED=0
 RESERVED=0
@@ -556,11 +653,44 @@ pool_matches_project_filter() {  # <primary-checkout> <pool-dir>
   return 1
 }
 
-DUPLICATE_REPORT=$(fm_pool_duplicate_dirs || true)
+# Which repository each pool belongs to, read once so the sweep, the duplicate
+# finding and the ledger all describe the same disk.
+POOL_INVENTORY=$(fm_pool_inventory || true)
+DUPLICATE_REPORT=$(printf '%s\n' "$POOL_INVENTORY" | fm_pool_duplicates_from_inventory || true)
+
+# This pool's inventory row as "<state><TAB><repository>", or empty.
+inventory_row() {  # <pool-dir>
+  printf '%s\n' "$POOL_INVENTORY" | awk -F'\t' -v p="$1" '$1 == p { print $2 "\t" $3; exit }'
+}
+
+# Other pools backing the same repository, ready to print. Empty when this pool
+# is that repository's only one. Each path is shortened individually, so a list of
+# three reads as well as a list of one.
+sibling_pools() {  # <pool-dir> <repository>
+  local other out=
+  [ -n "${2:-}" ] || return 0
+  while IFS= read -r other; do
+    [ -n "$other" ] || continue
+    out="${out:+$out, }$(display_path "$other")"
+  done < <(printf '%s\n' "$POOL_INVENTORY" \
+    | awk -F'\t' -v me="$1" -v repo="$2" '$3 == repo && $1 != me { print $1 }')
+  printf '%s\n' "$out"
+}
+
+# Refuse every copy in a pool the sweep cannot judge, with one shared reason.
+refuse_whole_pool() {  # <pool-name> <pool-dir> <reason>
+  local copy
+  while IFS= read -r copy; do
+    [ -n "$copy" ] || continue
+    record "$1" "$copy" refused "$3"
+    REFUSED=$((REFUSED + 1))
+  done < <(fm_pool_copies "$2")
+}
 
 sweep_pool() {  # <pool-dir>
   local pool=$1 backing primary pool_name reserve copy copy_real status idle
   local claim candidates=() ages=() i n keep destroy_out
+  local row state repo declared siblings note
   backing=$(fm_pool_backing_state "$pool")
   primary=${backing#present }
   [ "$backing" != "${backing#present }" ] || primary=
@@ -568,27 +698,63 @@ sweep_pool() {  # <pool-dir>
   pool_name=$(basename "$pool")
   pool_matches_project_filter "$primary" "$pool" || return 0
 
+  row=$(inventory_row "$pool")
+  state=${row%%	*}
+  repo=${row#*	}
+  [ "$state" != "$row" ] || { state=unknown; repo=; }
+  siblings=$(sibling_pools "$pool" "$repo")
+
   if [ -z "$primary" ]; then
-    # An orphan or unreadable pool: its object store is gone, so no branch in it
-    # can be checked against anything. Report it and leave every copy alone -
-    # deciding it empty would be a guess, and guesses are what rule 4 forbids.
-    while IFS= read -r copy; do
-      [ -n "$copy" ] || continue
-      record "$pool_name" "$copy" refused "its backing repository is gone, so nothing it holds can be verified"
-      REFUSED=$((REFUSED + 1))
-    done < <(fm_pool_copies "$pool")
+    # Stranded: the repository these copies were made from has been renamed or
+    # removed, so no branch in them can be checked against anything. Report it and
+    # leave every copy alone - deciding it empty would be the guess rule 4 forbids.
+    # Naming the repository it went looking for is what lets an operator tell this
+    # apart from a pool that was simply never examined.
+    declared=$(fm_pool_repo_key "$pool")
+    declared=${declared#declared }
+    declared=${declared#unknown}
+    note="it was made from $(display_path "${declared%/.git}"), which is no longer there, so nothing it holds can be checked against a branch"
+    [ -n "$siblings" ] && note="$note. The same repository is served by $siblings"
+    record_pool "$pool" stranded "$note"
+    refuse_whole_pool "$pool_name" "$pool" \
+      "its backing repository is gone, so nothing it holds can be verified"
     return 0
   fi
 
   if ! load_pool_status "$primary"; then
-    while IFS= read -r copy; do
-      [ -n "$copy" ] || continue
-      record "$pool_name" "$copy" refused "the pool's own status could not be read, so whether it is in use is unknown"
-      REFUSED=$((REFUSED + 1))
-    done < <(fm_pool_copies "$pool")
+    record_pool "$pool" unknown \
+      "its state could not be read from $(display_path "$primary")"
+    refuse_whole_pool "$pool_name" "$pool" \
+      "the pool's own status could not be read, so whether it is in use is unknown"
     return 0
   fi
 
+  if ! pool_status_covers "$pool"; then
+    # A second pool for one repository. treehouse answers for the canonical pool
+    # whatever directory it is asked from, so this one can never be handed to a
+    # worker again - it is disk the fleet cannot use. Reaping it copy by copy
+    # would treat the symptom; the remedy is to consolidate it, and until then
+    # its state genuinely cannot be read, so rule 4 refuses.
+    if [ -n "$siblings" ]; then
+      record_pool "$pool" duplicate \
+        "a second pool for one repository. treehouse serves $siblings instead, so no worker can ever be given a copy from here"
+      refuse_whole_pool "$pool_name" "$pool" \
+        "it is a second pool for one repository and treehouse serves only the other, so its state cannot be read and no worker can be given it"
+    else
+      # Uncovered with no other pool to blame it on. Saying "a second pool" here
+      # would be a guess, and a wrong reason is what sent an operator hunting for
+      # a fault that was not there. Report exactly what was observed instead.
+      record_pool "$pool" unknown \
+        "treehouse did not report it when asked from $(display_path "$primary"), so what its copies hold cannot be read"
+      refuse_whole_pool "$pool_name" "$pool" \
+        "treehouse did not report this pool at all, so its state is unknown"
+    fi
+    return 0
+  fi
+
+  note=
+  [ -n "$siblings" ] && note="shares its repository with $siblings"
+  record_pool "$pool" served "$note"
   reserve=$(reserve_for_project "$(basename "$primary")")
 
   while IFS= read -r copy; do
@@ -605,9 +771,22 @@ sweep_pool() {  # <pool-dir>
       in-use|leased)
         record "$pool_name" "$copy" in-use "a worker is using it"
         IN_USE=$((IN_USE + 1)); continue ;;
-      available) ;;
+      available|dirty)
+        # `dirty` is treehouse's own word for a copy holding uncommitted changes.
+        # It is a state treehouse accounts for, not the absence of one, so it must
+        # not be answered with "treehouse does not account for it". It falls
+        # through to the gates below on purpose: they own the precise reason, and
+        # they are also the only place the boundary of the captain's narrow
+        # settings.local.json authority is decided. Bailing out here would report
+        # a known state as an unknown one and move that boundary at the same time.
+        ;;
+      '')
+        record "$pool_name" "$copy" refused "treehouse does not list it in this pool, so its state is unknown"
+        REFUSED=$((REFUSED + 1)); continue ;;
       *)
-        record "$pool_name" "$copy" refused "treehouse does not account for it, so its state is unknown"
+        # Named literally rather than bucketed, so a treehouse that grows a new
+        # status says so out loud instead of quietly reading as unaccounted for.
+        record "$pool_name" "$copy" refused "treehouse reports it as '$status', which this sweep does not know how to judge"
         REFUSED=$((REFUSED + 1)); continue ;;
     esac
 
@@ -693,6 +872,15 @@ emit_json() {
     printf '"%s"' "$(json_escape "${SCANNED_HOMES[$i]}")"
     first=0
   done
+  printf '],"pools":['
+  first=1
+  for i in ${POOL_LEDGER_DIR+"${!POOL_LEDGER_DIR[@]}"}; do
+    [ "$first" = 1 ] || printf ','
+    printf '{"pool":"%s","state":"%s","copies":%s,"note":"%s"}' \
+      "$(json_escape "${POOL_LEDGER_DIR[$i]}")" "$(json_escape "${POOL_LEDGER_STATE[$i]}")" \
+      "$(pool_copy_count "${POOL_LEDGER_DIR[$i]}")" "$(json_escape "${POOL_LEDGER_NOTE[$i]}")"
+    first=0
+  done
   printf '],"copies":['
   first=1
   for i in ${REPORT_PATH+"${!REPORT_PATH[@]}"}; do
@@ -703,15 +891,6 @@ emit_json() {
     first=0
   done
   printf ']}\n'
-}
-
-# Paths as treehouse prints them: a pool root under $HOME reads as ~, which keeps
-# a report of several copies scannable instead of wrapping on a shared prefix.
-display_path() {  # <path>
-  case "${1:-}" in
-    "$HOME"/*) printf '~%s\n' "${1#"$HOME"}" ;;
-    *) printf '%s\n' "${1:-}" ;;
-  esac
 }
 
 emit_text() {
@@ -737,17 +916,38 @@ STUCK
     printf '  you decide. Discarding them needs your explicit word; this never does it for you:\n'
     printf '      treehouse destroy <copy> --include-unlanded --yes\n'
   fi
+  # Every pool that was looked at, with what came of it. A pool examined and left
+  # alone must not read the same as one that was never examined, so this prints
+  # whatever the outcome - including the quiet `served` rows.
+  if [ "${#POOL_LEDGER_DIR[@]}" -gt 0 ]; then
+    printf 'Pools - every pool of isolated copies, and whether it can still be used:\n'
+    local held
+    for i in "${!POOL_LEDGER_DIR[@]}"; do
+      held=$(pool_copy_count "${POOL_LEDGER_DIR[$i]}")
+      printf '  %-10s %s  (%s %s)\n' \
+        "${POOL_LEDGER_STATE[$i]}" "$(display_path "${POOL_LEDGER_DIR[$i]}")" \
+        "$held" "$([ "$held" = 1 ] && printf 'copy' || printf 'copies')"
+      [ -n "${POOL_LEDGER_NOTE[$i]}" ] && printf '             %s.\n' "${POOL_LEDGER_NOTE[$i]}"
+    done
+  fi
   if [ -n "$DUPLICATE_REPORT" ]; then
-    printf 'Duplicate pools - one repository holding more than one pool:\n'
+    printf 'One repository holding more than one pool:\n'
+    # Read with a trailing newline on the pool list. Without one the final field
+    # is a line `read` never returns, which is how this section once printed a
+    # single pool under a heading that promises more than one.
     while IFS=$'\t' read -r common pools; do
       [ -n "$common" ] || continue
-      printf '  %s\n' "$(display_path "$common")"
-      printf '%s' "$pools" | tr ',' '\n' | while IFS= read -r dup; do
-        [ -n "$dup" ] && printf '    %s\n' "$(display_path "$dup")"
-      done
+      printf '  %s\n' "$(display_path "${common%/.git}")"
+      while IFS= read -r dup; do
+        [ -n "$dup" ] || continue
+        printf '    %-10s %s\n' "$(ledger_state_of "$dup")" "$(display_path "$dup")"
+      done < <(printf '%s\n' "$pools" | tr ',' '\n')
     done <<EOF
 $DUPLICATE_REPORT
 EOF
+    printf '  Only the pool marked served can be handed to a worker; the rest is disk nothing\n'
+    printf '  can use. Consolidating them changes the repositories themselves, so it is\n'
+    printf '  yours to do - this only reports them and never removes a pool.\n'
   fi
   printf 'Pool: %d reclaimed, %d refused, %d kept warm, %d in use%s.\n' \
     "$RECLAIMED" "$REFUSED" "$RESERVED" "$IN_USE" \

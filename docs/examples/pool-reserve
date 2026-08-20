@@ -1,16 +1,19 @@
 # config/pool-reserve - how many isolated copies to keep warm per project.
 #
 # Copy to config/pool-reserve and edit. Every line is optional: with no file at
-# all, firstmate keeps one warm copy per project and waits 24 hours before
+# all, firstmate keeps two warm copies per project and waits 24 hours before
 # reclaiming an idle one.
 
-# A bare number sets the default reserve for every project.
-1
+# A bare number sets the default reserve for every project. Two covers the first
+# pair of a burst; every worker beyond the reserve waits for a fresh copy and a
+# full dependency install before it can start.
+2
 
 # A named project overrides that default. Use the project's directory name.
-# Raise it for a project you routinely fan several workers out across; each extra
-# warm copy costs a full dependency tree on disk.
-# teller-tales = 2
+# Raise it for a project you routinely fan more than two workers out across; each
+# extra warm copy costs a full dependency tree on disk, kept for as long as the
+# project exists.
+# teller-tales = 3
 
 # Hours a copy must sit untouched before it may be reclaimed. Slack against a
 # copy that was just handed out but not yet recorded against its task.

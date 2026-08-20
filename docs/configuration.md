@@ -123,16 +123,27 @@ Every worker runs in its own isolated copy of the project, taken from a pool of 
 The pool only ever grew: it reached the high-water mark of concurrent workers a project had ever had and nothing gave a copy back.
 `bin/fm-pool-reap.sh` keeps it at what the fleet actually needs, and its header owns the complete refusal contract, the policy, and the exact command mechanics.
 
-The defaults need no configuration: one warm copy per project, and a copy must sit untouched for 24 hours before it may be reclaimed.
+The defaults need no configuration: two warm copies per project, and a copy must sit untouched for 24 hours before it may be reclaimed.
 The optional local, gitignored `config/pool-reserve` overrides them.
 A bare integer on its own line sets the default reserve for every project; a `<project> = <n>` line overrides one project by its directory name; and `min-idle-hours = <h>` sets the settling window.
 Blank lines and `#` comments are ignored, and a malformed value is reported and refused rather than silently replaced by a default.
 `--reserve` and `--min-idle-hours` override the file for a single run, and `--dry-run` previews a sweep without removing anything.
 See [`examples/pool-reserve`](examples/pool-reserve) for a copyable config.
 
-The reserve is small on purpose.
-Nought would make every dispatch pay a full dependency install before its worker could start; a large reserve costs a whole dependency tree per extra copy to save that install only on a *concurrent* second dispatch, which is far rarer than a serial next one.
+The reserve is small on purpose, and two rather than one because firstmate sends independent work out in bursts.
+Nought would make every dispatch pay a full dependency install before its worker could start, and one covers only the first worker of a pair.
+Each extra warm copy above that costs a whole dependency tree, held for as long as the project exists.
+
+What the first dispatches after a sweep cost, stated plainly rather than hidden behind the number: the first two workers onto a freshly swept project start at once, and every additional *concurrent* worker in that same burst waits for a new copy plus one full dependency install before it can begin.
+That is paid once per extra worker rather than once per task, and the pool keeps the copies it grows until they fall idle again.
+Raise `<project> = <n>` for a project you routinely fan out wider than two; it trades disk for the start-up time of a burst.
+
+The settling window, not the reserve, is what protects a project that is busy.
+Every copy touched inside that window is kept whatever the reserve says, so an active project is never swept down behind a running fleet, and the reserve governs only how many cold copies survive.
 The reserve counts only copies actually available for reuse, so a copy in use, or one refused because it holds work, is never counted as warm.
+
+Each run also accounts for every pool on the machine, not only for the copies it swept.
+A pool whose repository has been renamed or removed, and a second pool for a repository that already has one, are both named with the reason they cannot be used, so a pool that was examined and left alone never reads like one that was never examined.
 
 The sweep runs automatically after a task's cleanup, which is when a copy becomes free, and can be run by hand at any time.
 It is deliberately not part of session start, which keeps external network calls off its blocking path.
