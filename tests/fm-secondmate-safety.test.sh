@@ -64,6 +64,11 @@ test_fm_home_parameterization() {
   [ -f "$brief" ] || fail "brief was not written under FM_HOME/data"
   grep -F ">> '$home_one/state/task-a.status'" "$brief" >/dev/null || fail "brief did not shell-quote FM_HOME state path"
 
+  # A scout's --scope-given is backed by a recorded framing verdict
+  # (bin/fm-scout-framing.sh); this case is about FM_HOME path isolation, not scope.
+  FM_HOME="$home_one" "$ROOT/bin/fm-scout-framing.sh" task-b \
+    --captain-words 'Find out whether the app drops sessions.' \
+    --question 'Does the app drop sessions?' >/dev/null || fail "could not record the scout framing under FM_HOME"
   FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-b app --scout --scope-given >/dev/null || fail "scout brief scaffold failed under FM_HOME"
   brief="$home_one/data/task-b/brief.md"
   grep -F ">> '$home_one/state/task-b.status'" "$brief" >/dev/null || fail "scout brief did not shell-quote FM_HOME state path"

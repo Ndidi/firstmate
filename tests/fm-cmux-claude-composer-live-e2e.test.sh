@@ -51,6 +51,13 @@ git -C "$LAB/projects/comms" add README.md
 git -C "$LAB/projects/comms" commit -qm 'fixture: initialize cmux Claude composer probe'
 
 STATUS="$LAB/state/$TASK.status"
+# A scout's --scope-given is backed by a recorded framing verdict
+# (bin/fm-scout-framing.sh). This probe's question is fixed by the harness under
+# test, so record it and scaffold.
+FM_HOME="$LAB" "$ROOT/bin/fm-scout-framing.sh" "$TASK" \
+  --captain-words 'Find out whether the Claude composer accepts a submit.' \
+  --question 'Does the Claude composer accept a submit?' >/dev/null \
+  || fail "could not record the Claude probe framing"
 FM_HOME="$LAB" "$ROOT/bin/fm-brief.sh" "$TASK" comms --scout --scope-given || fail "could not scaffold the Claude probe brief"
 python3 - "$LAB/data/$TASK/brief.md" "$STATUS" <<'PY'
 from pathlib import Path

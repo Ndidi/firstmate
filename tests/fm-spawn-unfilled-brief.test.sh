@@ -73,6 +73,14 @@ test_unfilled_brief_is_refused() {
   # A scout spawn refuses the ship delivery flags, so each kind carries its own.
   while IFS='|' read -r label brief_flags spawn_flags; do
     [ -n "$label" ] || continue
+    # A scout's --scope-given is backed by a recorded framing verdict
+    # (bin/fm-scout-framing.sh); this test is about the {TASK} placeholder, not scope.
+    if [ "$label" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-scout-framing.sh" "unfilled-$label" \
+        --captain-words 'Find out whether alpha drops records.' \
+        --question 'Does alpha drop records?' >/dev/null 2>&1 \
+        || fail "$label: could not record the fixture framing"
+    fi
     # shellcheck disable=SC2086  # brief_flags is an intentional word-split arg list
     FM_HOME="$home" "$BRIEF" "unfilled-$label" alpha $brief_flags --scope-given >/dev/null 2>&1 \
       || fail "$label: could not scaffold the fixture brief"

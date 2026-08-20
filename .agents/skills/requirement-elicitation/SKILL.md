@@ -33,7 +33,7 @@ Do not fire for any of these, and this list wins on a tie:
 - A mechanical change: a rename, a typo, a version bump, a config value, a move.
 - A follow-up that inherits a settled context from work already under way or just finished.
 - Anything the captain has already specified, in this session or in a durable record.
-- An investigation or audit the captain asked for directly, where the question they asked is the scope.
+- An investigation or audit, whose framing is a separate judgement with a checked gate of its own; load `investigation-framing` rather than settling it here.
 
 **Err toward not firing.**
 A brief written from a clear request is fine.
@@ -44,6 +44,7 @@ When the call is genuinely close, ask the captain one plain question naming what
 
 Both paths produce the same artifact at the same location.
 They differ in who runs the elicitation and whether the code is present while it runs.
+`investigation-framing` routes an escalated investigation into these same two paths, so an investigation reaches Crucible's `discover` exactly the way an implementation does.
 
 **Light** is the default.
 Firstmate runs the elicitation itself at intake, in the current session.
@@ -81,7 +82,7 @@ The deep path is an ordinary scout followed by an ordinary promotion.
 It introduces no second dispatch mechanism, and every existing safety boundary applies to it unchanged.
 
 1. Dispatch a scout against the project in the normal way, per `AGENTS.md` section 7.
-   Scaffold its brief with `bin/fm-brief.sh <task-id> <repo> --scout --scope-given`: the scout's own scope is the discovery itself, which the captain's request already settles.
+   Declare the discovery framing with `bin/fm-scout-framing.sh <task-id> --discovery`, then scaffold its brief with `bin/fm-brief.sh <task-id> <repo> --scout --scope-given`: the scout's own scope is the discovery itself, which the captain's request already settles.
 2. The scout's task text instructs it to run Crucible's `discover` and then `plan` inside its worktree, and to write the requirement to `data/<task-id>/requirement.md` rather than into the project.
    The scout still owes its report at `data/<task-id>/report.md`; the requirement document is a second artifact beside it, not a replacement.
 3. The scout reaches the captain the way every scout does, through firstmate.
@@ -107,6 +108,7 @@ The generated brief then carries a `# Requirement` section pointing the worker a
 `bin/fm-brief.sh` refuses to scaffold without one of `--requirement` or `--scope-given`, the same way it refuses to guess `--mode`.
 `--scope-given` is the not-firing case above, declared rather than assumed.
 Reach for it freely when the test at the top says not to fire; that is what it is for.
+On a scout brief it is not a bare declaration: `investigation-framing` owns the recorded verdict that has to back it.
 Do not reach for it to skip an elicitation the test says is due, because the whole cost of a thin brief lands on the worker and then on the captain reviewing what the worker built.
 
 `bin/fm-spawn.sh` separately refuses to launch a brief whose task text is still the unfilled `{TASK}` placeholder.

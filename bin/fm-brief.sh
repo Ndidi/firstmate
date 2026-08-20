@@ -46,6 +46,11 @@
 #   --scope-given         a declaration that the captain's request already carried
 #                         concrete scope, so no elicitation was due (a scoped request,
 #                         a bug fix, a mechanical change, a settled follow-up).
+#                         On a --scout brief this declaration is NOT taken on
+#                         firstmate's own word, because a scout's question is
+#                         normally firstmate's to invent: it additionally requires a
+#                         framing verdict of captain-framed or discovery recorded by
+#                         bin/fm-scout-framing.sh (.agents/skills/investigation-framing).
 # The two are mutually exclusive, and both are refused on a secondmate charter, which
 # is a standing domain rather than a task scope. The .agents/skills/requirement-elicitation
 # skill owns which case applies and how the document is produced.
@@ -223,6 +228,22 @@ else
   fi
 fi
 ID=${POS[0]}
+
+# A scout answers a question, and that question is normally firstmate's own framing
+# rather than the captain's words. --scope-given alone is the self-graded judgement
+# that dispatched two wrongly framed investigations on 2026-08-20, so on a scout it
+# must be backed by the recorded framing verdict rather than asserted here.
+# .agents/skills/investigation-framing owns the rule; --requirement is unaffected,
+# because a requirement document already IS the confirmed framing.
+if [ "$KIND" = scout ] && [ "$SCOPE_GIVEN" -eq 1 ]; then
+  FRAMING_VERDICT=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-scout-framing.sh" "$ID" --verdict 2>/dev/null) || FRAMING_VERDICT=
+  case "$FRAMING_VERDICT" in
+    captain-framed|discovery) ;;
+    *)
+      echo "error: a scout brief cannot take --scope-given on firstmate's own reading of the request; record the framing first: bin/fm-scout-framing.sh $ID --captain-words '<their exact request>' --question '<the one question this scout would answer>'. A confirm-required verdict means you confirm that framing with the captain, write the answer to a requirement document, and scaffold with --requirement instead. Load .agents/skills/investigation-framing to decide which applies" >&2
+      exit 1 ;;
+  esac
+fi
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2

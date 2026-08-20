@@ -26,6 +26,17 @@ mkdir -p "$BRIEF_HOME/data"
 # CI and locally, where the issue #958/#1069 parser bug does not fire, so this
 # is a weak guard on its own; test_no_heredoc_in_command_substitution and the
 # macos-stock-bash CI job carry the real cross-version enforcement.
+# A scout brief's --scope-given is now backed by a recorded framing verdict
+# (bin/fm-scout-framing.sh); tests/fm-scout-framing.test.sh owns that contract.
+# The cases below care about the generated scout contract rather than where its
+# scope came from, so they record a real captain-framed verdict and move on.
+record_scout_framing() {
+  FM_HOME="$1" "$ROOT/bin/fm-scout-framing.sh" "$2" \
+    --captain-words 'Find out whether the exporter drops layers.' \
+    --question 'Does the exporter drop layers?' >/dev/null 2>&1 \
+    || fail "could not record the scout framing for $2"
+}
+
 test_script_parses() {
   local out rc
   out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
@@ -476,6 +487,12 @@ test_scratch_cleanup_is_part_of_done() {
   done
 
   id="brief-scratch-scout"
+  # A scout's --scope-given is backed by a recorded framing verdict
+  # (bin/fm-scout-framing.sh); this case is about the scratch cleanup line, not scope.
+  FM_HOME="$home" "$ROOT/bin/fm-scout-framing.sh" "$id" \
+    --captain-words 'Find out whether the importer drops rows.' \
+    --question 'Does the importer drop rows?' >/dev/null \
+    || fail "could not record the scratch-cleanup scout framing"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout --scope-given >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_grep "clean up your scratch" "$brief" \
@@ -581,6 +598,7 @@ test_herdr_lab_contract_quotes_foreign_firstmate_path() {
   id="brief-herdr-lab-foreign-d2"
   helper=$(printf '%s' "$foreign_root/bin/fm-herdr-lab.sh" | sed "s/'/'\\\\''/g")
   helper="'$helper'"
+  record_scout_framing "$home" "$id"
   FM_HOME="$home" FM_ROOT_OVERRIDE="$foreign_root" "$ROOT/bin/fm-brief.sh" "$id" foreign --scout --herdr-lab --scope-given >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_grep "HERDR_LAB_HELPER=$helper" "$brief" \
@@ -597,6 +615,7 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   for kind in ship scout; do
     id="brief-herdr-gate-$kind"
     if [ "$kind" = scout ]; then
+      record_scout_framing "$home" "$id"
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --scope-given >/dev/null 2>&1
     else
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --scope-given >/dev/null 2>&1
@@ -792,6 +811,7 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
   local home brief status=0
   home="$TMP_ROOT/herdr-kind-home"
   mkdir -p "$home/data"
+  record_scout_framing "$home" herdr-scout
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" herdr-scout firstmate --scout --herdr-lab --scope-given >/dev/null 2>&1
   brief="$home/data/herdr-scout/brief.md"
   assert_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
@@ -817,6 +837,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
           "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes --scope-given >/dev/null 2>&1
         ;;
       scout)
+        record_scout_framing "$home" "$id"
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
           "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --scope-given >/dev/null 2>&1
         ;;
@@ -846,6 +867,7 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
   mkdir -p "$home/data"
+  record_scout_framing "$home" sample-investigation
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$ROOT/bin/fm-brief.sh" sample-investigation sample --scout --scope-given >/dev/null 2>&1
   scout="$home/data/sample-investigation/brief.md"
@@ -864,6 +886,7 @@ test_scout_and_secondmate_load_decision_hold_policy() {
 # Scout and secondmate paths still scaffold well-formed briefs.
 test_scout_and_secondmate_scaffold() {
   local brief
+  record_scout_framing "$BRIEF_HOME" brief-scout-q6
   FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-scout-q6 alpha --scout --scope-given >/dev/null 2>&1 \
     || fail "fm-brief.sh scout scaffold exited non-zero"
   brief="$BRIEF_HOME/data/brief-scout-q6/brief.md"
