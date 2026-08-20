@@ -76,6 +76,9 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
   # fm-lock-lib.sh: teardown sources it for the shared lock-staleness proof.
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
+  # fm-teardown-safety-lib.sh: the unlanded-work test, which teardown sources
+  # rather than defining inline now that bin/fm-pool-reap.sh shares that owner.
+  ln -s "$ROOT/bin/fm-teardown-safety-lib.sh" "$fake/bin/fm-teardown-safety-lib.sh"
   # Lifecycle serialization, status presentation retirement, and shared adapter
   # ownership are sourced by teardown.
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
@@ -156,6 +159,9 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-composer-lib.sh" "$fake/bin/fm-composer-lib.sh"
   ln -s "$ROOT/bin/fm-nm-run-lib.sh" "$fake/bin/fm-nm-run-lib.sh"
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
+  # fm-teardown-safety-lib.sh: the unlanded-work test, sourced rather than
+  # defined inline now that bin/fm-pool-reap.sh shares that owner.
+  ln -s "$ROOT/bin/fm-teardown-safety-lib.sh" "$fake/bin/fm-teardown-safety-lib.sh"
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
   ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
   ln -s "$ROOT/bin/fm-wake-lib.sh" "$fake/bin/fm-wake-lib.sh"
