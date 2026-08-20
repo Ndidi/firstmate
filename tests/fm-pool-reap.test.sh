@@ -63,6 +63,11 @@ make_pool() {  # <case-dir> <project> <n>
   repo="$base/projects/$project"
   pool="$base/pool/$project-abc123"
   fm_git_init_commit "$repo"
+  # Hermetic: neutralize any machine-global ignore file. This operator's
+  # ~/.config/git/ignore lists **/.claude/settings.local.json, which would hide
+  # the very file the exception cases are about and make them pass without
+  # testing anything - and fail on a machine without that line.
+  git -C "$repo" config core.excludesFile /dev/null
   fm_git_add_origin "$repo" "$repo.origin.git"
   mkdir -p "$pool"
   for i in $(seq 1 "$n"); do
@@ -99,7 +104,7 @@ age_copy() {  # <copy> <days>
 
 # One self-contained case directory with its own pool root, home, and PATH.
 new_case() {  # <name>
-  local name=$1 dir="$TMP_ROOT/$1"
+  local dir="$TMP_ROOT/$1"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/pool" "$dir/projects"
   fm_fakebin "$dir" >/dev/null
   make_fake_treehouse "$dir/fakebin" "$dir/status.json"
@@ -213,20 +218,27 @@ test_refuses_a_copy_with_uncommitted_changes() {
   pass "a copy with uncommitted changes is left untouched, with the reason stated"
 }
 
-test_settings_local_json_exception_is_honoured_exactly() {
+test_the_settings_local_json_authority_is_never_widened_here() {
   local dir pool out
   dir=$(new_case settings-sole); pool=$(make_pool "$dir" alpha 2)
   write_status "$dir/status.json" "$pool"/{1,2}/alpha
-  # The captain's standing authority of 2026-08-11: this one file, and only when
-  # it is the sole uncommitted change.
+  # The captain's standing authority of 2026-08-11 covers this exact path as the
+  # SOLE uncommitted change. It is not expressed as an exemption in the shared
+  # owner: claude's hooks no longer live in a worktree, and task cleanup removes
+  # an untracked legacy file at the old path outright. The reaper performs no such
+  # removal, so it must see the leftover as ordinary untracked content and refuse.
+  # Inheriting the owner's treatment - never widening it - is the whole point.
   mkdir -p "$pool/1/alpha/.claude"
   printf '{}\n' > "$pool/1/alpha/.claude/settings.local.json"
   local i; for i in 1 2; do age_copy "$pool/$i/alpha" 9; done
 
   out=$(run_reap "$dir" --reserve 0)
-  [ ! -d "$pool/1/alpha" ] || fail "a lone settings.local.json must not block reclaim: $out"
+  [ -d "$pool/1/alpha" ] || fail "the reaper must not invent an exemption of its own: $out"
+  assert_contains "$out" "untracked files nobody has claimed" \
+    "a leftover settings file is ordinary untracked content to the reaper"
 
-  # And no wider: the same file alongside any other change still refuses.
+  # And nothing wider: the same file alongside a tracked edit refuses for the
+  # ordinary reason, which is the half the captain's note is emphatic about.
   dir=$(new_case settings-plus); pool=$(make_pool "$dir" alpha 2)
   write_status "$dir/status.json" "$pool"/{1,2}/alpha
   mkdir -p "$pool/1/alpha/.claude"
@@ -237,7 +249,7 @@ test_settings_local_json_exception_is_honoured_exactly() {
   out=$(run_reap "$dir" --reserve 0)
   [ -d "$pool/1/alpha" ] || fail "settings.local.json alongside another change must still refuse: $out"
   assert_contains "$out" "uncommitted changes to tracked files" "the wider case refuses for the ordinary reason"
-  pass "the settings.local.json exception clears a sole change and nothing wider"
+  pass "the settings.local.json authority is inherited from the owner and never widened by the reaper"
 }
 
 test_untracked_only_content_blocks_reclaim_and_is_reported_as_a_decision() {
@@ -513,7 +525,7 @@ test_reserve_is_configurable_and_defaults_need_no_config
 test_malformed_config_is_refused_not_silently_defaulted
 test_recently_used_copies_wait_out_the_settling_window
 test_refuses_a_copy_with_uncommitted_changes
-test_settings_local_json_exception_is_honoured_exactly
+test_the_settings_local_json_authority_is_never_widened_here
 test_untracked_only_content_blocks_reclaim_and_is_reported_as_a_decision
 test_refuses_an_unmerged_branch_even_when_it_is_pushed
 test_accepts_work_whose_content_already_landed_by_squash_merge

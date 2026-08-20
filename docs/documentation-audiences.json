@@ -265,6 +265,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/pool-reserve",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/wedge-alarm",
       "audience": "operator-example"
     },
