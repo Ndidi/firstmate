@@ -117,6 +117,27 @@ An absent file means `auto`, i.e. default-on on macOS: the alarm exists precisel
 A missing or failing channel logs and falls through to the next, never crashing the daemon.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Worktree pool reserve (config/pool-reserve)
+
+Every worker runs in its own isolated copy of the project, taken from a pool of pre-warmed checkouts.
+The pool only ever grew: it reached the high-water mark of concurrent workers a project had ever had and nothing gave a copy back.
+`bin/fm-pool-reap.sh` keeps it at what the fleet actually needs, and its header owns the complete refusal contract, the policy, and the exact command mechanics.
+
+The defaults need no configuration: one warm copy per project, and a copy must sit untouched for 24 hours before it may be reclaimed.
+The optional local, gitignored `config/pool-reserve` overrides them.
+A bare integer on its own line sets the default reserve for every project; a `<project> = <n>` line overrides one project by its directory name; and `min-idle-hours = <h>` sets the settling window.
+Blank lines and `#` comments are ignored, and a malformed value is reported and refused rather than silently replaced by a default.
+`--reserve` and `--min-idle-hours` override the file for a single run, and `--dry-run` previews a sweep without removing anything.
+See [`examples/pool-reserve`](examples/pool-reserve) for a copyable config.
+
+The reserve is small on purpose.
+Nought would make every dispatch pay a full dependency install before its worker could start; a large reserve costs a whole dependency tree per extra copy to save that install only on a *concurrent* second dispatch, which is far rarer than a serial next one.
+The reserve counts only copies actually available for reuse, so a copy in use, or one refused because it holds work, is never counted as warm.
+
+The sweep runs automatically after a task's cleanup, which is when a copy becomes free, and can be run by hand at any time.
+It is deliberately not part of session start, which keeps external network calls off its blocking path.
+This file is inherited by secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) contract.
+
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
 
 The optional local, gitignored `config/trace-context` presence flag enables default-off native W3C trace-context propagation.

@@ -31,6 +31,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-install-herdr.sh`    | Install CI's exact-version Herdr pin with official asset URL, SHA-256, and protocol checks |
 | `fm-install-treehouse.sh`| Install CI's exact-version Treehouse pin for real-Herdr E2E that needs spawn worktrees |
+| `fm-pool-reap.sh`        | Keep the worktree pool at the fleet's warm reserve, refusing every copy that holds unlanded, claimed, or unverifiable work |
+| `fm-pool-lib.sh`         | Shared pool inventory, and the one-repository-one-pool invariant that stops duplicate pools being seeded |
+| `fm-teardown-safety-lib.sh` | Shared owner of the unlanded-work test used by both task cleanup and the pool sweep |
 | `fm-herdr-ci-cleanup.sh` | Snapshot and tear down only job-owned `fm-lab-*` sessions in the Herdr CI lane       |
 | `fm-test-run.sh`         | Behavior-test runner: selection, portable lanes, proven-isolated `--jobs`, coverage guard, timing/JSON |
 | `fm-test-isolation-proof.sh` | Concurrent isolation proof and proven-isolated candidate set owner |

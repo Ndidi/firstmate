@@ -2311,4 +2311,11 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
+# Cleanup is the moment a copy actually becomes free, and - because a copy stays
+# protected for exactly as long as a task is recorded against it - the moment any
+# copy can become reclaimable at all. So the pool sweep runs here rather than on a
+# timer. Best-effort: this teardown has already fully succeeded, and the sweep
+# refuses rather than removes when anything is unclear, so a failure here must
+# never turn a completed teardown into a failed one.
+"$FM_ROOT/bin/fm-pool-reap.sh" || true
 backlog_refresh_reminder

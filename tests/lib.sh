@@ -34,6 +34,14 @@ FM_TEST_LIB_SOURCED=1
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Keep the worktree pool reaper away from the operator's REAL pool. Tests do not
+# isolate HOME, so bin/fm-pool-lib.sh would otherwise resolve ~/.treehouse - the
+# live fleet's copies - for any test that reaches bin/fm-pool-reap.sh, directly
+# or through a teardown. Pointing it at a path that does not exist makes every
+# such sweep find no pools and do nothing. A test that wants a pool sets
+# FM_POOL_ROOT to its own fixture and overrides this.
+export FM_POOL_ROOT="${FM_POOL_ROOT:-/nonexistent/fm-test-pool-root}"
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
