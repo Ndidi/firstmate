@@ -187,6 +187,34 @@ SH
   chmod +x "$fakebin/$tool"
 }
 
+# --- launch-line reading ----------------------------------------------------
+
+# fm_launch_unwrap: filter a captured log so each line shows the command the
+# worker actually RUNS. bin/fm-crew-memory-cap.sh wraps every spawned worker in
+# a memory-bounded scope, so a test asserting on the harness launch itself has
+# to look inside that wrapper.
+#
+# The wrapper is matched wherever it appears in the line, not only at the start,
+# because some fixtures log the whole `send-keys -t <target> -l <cmd>` call
+# rather than the payload alone; anything before the wrapper is preserved so
+# assertions about the surrounding tmux call keep working. A line with no
+# wrapper passes through untouched, which keeps the same assertion working on
+# hosts where the bound is unavailable and no wrapper was applied.
+fm_launch_unwrap() {
+  local line prefix inner
+  while IFS= read -r line; do
+    case "$line" in
+      *"systemd-run --user --scope"*" -- /bin/sh -c '"*)
+        prefix=${line%%systemd-run --user --scope*}
+        inner=${line#*" -- /bin/sh -c '"}
+        inner=${inner%\'}
+        printf '%s%s\n' "$prefix" "$(printf '%s' "$inner" | sed "s/'\\\\''/'/g")"
+        ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done
+}
+
 # --- deterministic git identity and fixtures --------------------------------
 
 # fm_git_identity [name] [email]: export a fixed author/committer identity so

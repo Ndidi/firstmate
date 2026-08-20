@@ -452,6 +452,46 @@ test_pr_body_tldr_contract() {
 
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
+# Scratch cleanup is part of being done for every worker that gets a disposable
+# copy - all three ship modes and the scout - and it has to be read BEFORE the
+# done gate, or a worker follows "append done and stop" and never reaches it.
+# A persistent secondmate has no scratch worktree and is deliberately excluded.
+test_scratch_cleanup_is_part_of_done() {
+  local home id brief mode cleanup_line done_line
+  home="$TMP_ROOT/scratch-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-scratch-${mode}"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" --scope-given >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$mode brief was not scaffolded"
+    assert_grep "clean up your scratch" "$brief" \
+      "$mode brief must make scratch cleanup part of being done"
+    cleanup_line=$(grep -n "clean up your scratch" "$brief" | head -1 | cut -d: -f1)
+    done_line=$(grep -n "append .done: " "$brief" | tail -1 | cut -d: -f1)
+    [ -n "$cleanup_line" ] && [ -n "$done_line" ] \
+      || fail "$mode brief is missing the cleanup or done line"
+    [ "$cleanup_line" -lt "$done_line" ] \
+      || fail "$mode brief puts scratch cleanup after the done gate, where a worker never reads it"
+  done
+
+  id="brief-scratch-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout --scope-given >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "clean up your scratch" "$brief" \
+    "scout brief must make scratch cleanup part of being done"
+  cleanup_line=$(grep -n "clean up your scratch" "$brief" | head -1 | cut -d: -f1)
+  done_line=$(grep -n "append .done: {one-line conclusion}" "$brief" | head -1 | cut -d: -f1)
+  [ "$cleanup_line" -lt "$done_line" ] \
+    || fail "scout brief puts scratch cleanup after the done gate"
+
+  id="brief-scratch-sm"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1
+  assert_no_grep "clean up your scratch" "$home/data/$id/brief.md" \
+    "a persistent secondmate charter has no scratch worktree and must not carry the cleanup line"
+  pass "scratch cleanup is part of done for ship and scout briefs, before the done gate"
+}
+
 test_no_mistakes_dod_wording() {
   local home id brief
   home="$TMP_ROOT/wording-home"
@@ -855,6 +895,7 @@ test_requirement_document_reaches_the_brief
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_scratch_cleanup_is_part_of_done
 test_pr_body_tldr_contract
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

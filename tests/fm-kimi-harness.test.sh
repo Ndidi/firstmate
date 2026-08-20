@@ -68,7 +68,10 @@ case "${1:-}" in
       prev=$arg
     done
     if [ -n "$literal" ]; then
-      case "$literal" in
+      # Strip a trailing quote first: fm-spawn wraps the launch in the
+      # per-worker memory bound, so the real launch line ends `--auto'` rather
+      # than `--auto`. Unwrapped lines are unaffected.
+      case "${literal%\'}" in
         *' --auto')
           printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
           printf 'launched\n' > "$FM_FAKE_KIMI_STATE"
@@ -191,7 +194,7 @@ test_kimi_launch_then_send_is_verified() {
   expect_code 0 "$rc" "verified kimi launch-then-send should succeed"
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
-  launch=$(cat "$CASE_DIR/launch.log")
+  launch=$(fm_launch_unwrap < "$CASE_DIR/launch.log")
   [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
     || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
@@ -448,7 +451,7 @@ test_kimi_falls_back_to_expanded_home_binary() {
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
-  launch=$(cat "$CASE_DIR/launch.log")
+  launch=$(fm_launch_unwrap < "$CASE_DIR/launch.log")
   [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$fallback' --auto" ] \
     || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
   pass "fm-spawn: Kimi fallback expands the active HOME"

@@ -2843,6 +2843,18 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
 fi
+# --- firstmate memory cap (bin/fm-crew-memory-cap.sh owns everything below) ---
+# Bound this worker: the agent AND every process it launches run in one
+# per-worker cgroup scope, so a runaway child cannot reach the host again
+# (2026-08-20: one node child hit 24.6 GiB and took the whole session down).
+# Applied last so it wraps the fully composed line. The helper returns the
+# command UNCHANGED with a reason on stderr wherever the bound is unavailable,
+# and this assigns only on success, so a broken or absent helper spawns
+# unbounded rather than spawning nothing.
+if MEMCAP_LAUNCH=$("$SCRIPT_DIR/fm-crew-memory-cap.sh" wrap "$LAUNCH" "firstmate $KIND $ID"); then
+  LAUNCH=$MEMCAP_LAUNCH
+fi
+# --- end firstmate memory cap ---
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3

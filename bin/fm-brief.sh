@@ -90,6 +90,17 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 
+# --- firstmate scratch cleanup (one owner for the ship and scout briefs) ---
+# Leaving scratch behind is a real cost, not untidiness: on 2026-08-20 a crashed
+# worker's sheet-tmp.mjs, smoke-tmp.mjs, diag-tmp.mjs and .before/ were still
+# sitting in a project worktree, and nobody could tell which were deliberate.
+# Both generated definitions of done reference this one string.
+# shellcheck disable=SC2016  # backticks are markdown for the generated brief, not command substitution
+SCRATCH_DOD='Before you report done, clean up your scratch: remove the ad-hoc scripts, dumps, profiling output, and backup directories you created while working, and leave only what the deliverable needs.
+Run `git status --porcelain` and account for every remaining untracked path - each one is either part of the change or gone.
+'
+# --- end firstmate scratch cleanup ---
+
 resolve_directory_input() {
   local name=$1 path=$2 resolved
   case "$path" in
@@ -413,7 +424,7 @@ Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
-When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
+${SCRATCH_DOD}When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
 echo "scaffolded: $BRIEF (scout; replace {TASK})"
@@ -433,7 +444,7 @@ case "$MODE" in
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+${SCRATCH_DOD}When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Open the PR body with a short bullet TLDR before any detail, each bullet naming who the change serves and what it protects or gives them: \`- We introduced a launch-time isolation check to protect the captain's own copy of the repo from a worker committing into it.\`
 Detail may follow underneath, but it may not come first and it may not be the whole body.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
@@ -448,7 +459,7 @@ Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$ID\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
-When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
+${SCRATCH_DOD}When it is implemented and committed, append \`done: ready in branch fm/$ID\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
 EOF
     ;;
@@ -460,7 +471,7 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
+${SCRATCH_DOD}When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.

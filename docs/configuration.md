@@ -289,6 +289,27 @@ Malformed JSON, an empty or malformed rule/default array, an unverified harness,
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Crew memory cap (config/crew-memory-max)
+
+Every crewmate, scout, and secondmate spawned by `bin/fm-spawn.sh` runs inside a per-worker memory bound, so one runaway allocation can no longer take the host down.
+The bound covers the agent **and every process it launches**, which is the case that matters: on 2026-08-20 the agent itself held 369 MiB while a `node` child it started reached 24.6 GiB, and the resulting out-of-memory kill took the desktop session and all six workers with it.
+When a worker exceeds its limit it is killed, its local copy and unlanded work are untouched, and the pane falls back to a bare shell, which supervision already reads as a stopped worker and recovers through the ordinary path.
+
+The default needs no configuration: a quarter of the host's total memory, clamped to a 2 GiB floor and an 8 GiB ceiling.
+A 29 GiB machine yields 7446M and an 8 GiB machine yields the 2048M floor, so a small laptop and a large workstation both work unconfigured.
+The bound is per worker rather than fleet-wide, so one greedy worker cannot starve its siblings, and the ceiling leaves the desktop session real headroom, because the userspace pressure kill fires on the whole user session rather than on one worker.
+
+`config/crew-memory-max` is an optional local, gitignored override containing exactly one line: either a size such as `6G` or `512M`, or `off` to disable the bound.
+Secondmate homes inherit it from the primary, so a secondmate's own crewmates apply the same limit.
+A present-but-malformed, multi-line, symlinked, or hardlinked file is reported as a concrete error rather than treated as a default, and `off` is reported on every spawn so a disabled bound is never a silent one.
+
+Hosts that cannot offer the bound are handled deliberately, neither pretending they are protected nor refusing to work.
+The mechanism needs systemd, a running user manager, and cgroup memory delegation; where any of those is missing, the worker spawns **unbounded** and the reason is printed, naming what actually refused.
+Firstmate does not refuse to work on such a host, and it never spawns unbounded in silence.
+
+Use `bin/fm-crew-memory-cap.sh report` to see the effective limit, where it came from, and whether this host can apply it, and `bin/fm-crew-memory-cap.sh run <command>` to run an ad-hoc heavy command under the same bound.
+The script's own header owns the exact mechanism, the properties it sets, and why each one is required, and [`verification/crew-memory-cap.md`](verification/crew-memory-cap.md) records the evidence behind them with `bash tests/fm-crew-memory-cap.test.sh` as the command that refreshes it.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
