@@ -652,6 +652,40 @@ test_dry_run_decides_without_removing_anything() {
   pass "a preview run decides and reports without removing anything"
 }
 
+test_json_reports_the_reserve_the_run_actually_used() {
+  local dir pool out reported reclaimed
+  dir=$(new_case reserve-json); pool=$(make_pool "$dir" alpha 4)
+  write_status "$dir/status.json" "$pool"/{1,2,3,4}/alpha
+  local i; for i in 1 2 3 4; do age_copy "$pool/$i/alpha" 5; done
+  printf '3\n' > "$dir/home/config/pool-reserve"
+
+  # An explicit flag outranks the configured default, so this run reserves on 5
+  # and releases nothing. Both halves are asserted deliberately: the report and
+  # the decision each stating this precedence separately is exactly how the JSON
+  # came to name a reserve the sweep had not used, and checking only the number
+  # would let them drift apart again without a failure.
+  out=$(run_reap "$dir" --json --dry-run --reserve 5)
+  reported=$(printf '%s' "$out" | jq -r '.reserve_default')
+  reclaimed=$(printf '%s' "$out" | jq -r '.reclaimed')
+  [ "$reported" = 5 ] \
+    || fail "--reserve must outrank config/pool-reserve in the report too, got $reported: $out"
+  [ "$reclaimed" = 0 ] \
+    || fail "a reserve of 5 over 4 copies must release nothing, got $reclaimed: $out"
+
+  # The same fixture without the flag: the configured 3 applies, and the report
+  # follows the decision down as well as up. Re-age first - the run above reads
+  # each copy through git, which touches its index and pulls it back inside the
+  # settling window, so without this the second run would reserve everything for
+  # freshness and prove nothing about the reserve at all.
+  for i in 1 2 3 4; do age_copy "$pool/$i/alpha" 5; done
+  out=$(run_reap "$dir" --json --dry-run)
+  reported=$(printf '%s' "$out" | jq -r '.reserve_default')
+  reclaimed=$(printf '%s' "$out" | jq -r '.reclaimed')
+  [ "$reported" = 3 ] || fail "the configured default should be reported when no flag is given, got $reported: $out"
+  [ "$reclaimed" = 1 ] || fail "a reserve of 3 over 4 copies should release one, got $reclaimed: $out"
+  pass "the report names the reserve the run actually used, with the flag outranking the configured default"
+}
+
 test_json_report_accounts_for_every_copy() {
   local dir pool out
   dir=$(new_case json); pool=$(make_pool "$dir" alpha 3)
@@ -694,3 +728,4 @@ test_never_asks_treehouse_to_override_its_own_safety
 test_treehouse_refusal_is_reported_not_worked_around
 test_dry_run_decides_without_removing_anything
 test_json_report_accounts_for_every_copy
+test_json_reports_the_reserve_the_run_actually_used

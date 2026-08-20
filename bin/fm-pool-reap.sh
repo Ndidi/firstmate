@@ -299,16 +299,28 @@ fi
 
 MIN_IDLE_HOURS=${OPT_MIN_IDLE_HOURS:-${CFG_MIN_IDLE_HOURS:-$DEFAULT_MIN_IDLE_HOURS}}
 
+# The reserve a project with no entry of its own gets: an explicit flag, then the
+# configured default, then the built-in one. Resolved ONCE, into a variable, for
+# the same reason MIN_IDLE_HOURS above is. The report used to restate this
+# precedence itself and got the order wrong, so a run given `--reserve 5` beside a
+# configured 3 swept on 5 and reported 3 - a number nothing had used. A report
+# that names a value the run did not apply is worse than no report, because it is
+# believed. Every reader of this decision reads this variable.
+RESERVE_DEFAULT=${OPT_RESERVE:-${CFG_DEFAULT_RESERVE:-$DEFAULT_RESERVE}}
+
 reserve_for_project() {  # <project-name>
   local name=$1 i
-  if [ -n "$OPT_RESERVE" ]; then printf '%s\n' "$OPT_RESERVE"; return 0; fi
-  for i in "${!CFG_PROJECT_KEYS[@]}"; do
-    if [ "${CFG_PROJECT_KEYS[$i]}" = "$name" ]; then
-      printf '%s\n' "${CFG_PROJECT_VALUES[$i]}"
-      return 0
-    fi
-  done
-  printf '%s\n' "${CFG_DEFAULT_RESERVE:-$DEFAULT_RESERVE}"
+  # A per-project line applies only when no flag was given: an explicit --reserve
+  # outranks every configured value, the single-project ones included.
+  if [ -z "$OPT_RESERVE" ]; then
+    for i in "${!CFG_PROJECT_KEYS[@]}"; do
+      if [ "${CFG_PROJECT_KEYS[$i]}" = "$name" ]; then
+        printf '%s\n' "${CFG_PROJECT_VALUES[$i]}"
+        return 0
+      fi
+    done
+  fi
+  printf '%s\n' "$RESERVE_DEFAULT"
 }
 
 # --- rule 3: which copies do live task records claim? -----------------------
@@ -866,7 +878,7 @@ emit_json() {
   printf '{"reclaimed":%d,"refused":%d,"reserved":%d,"in_use":%d,"dry_run":%s,"reserve_default":%s,"min_idle_hours":%s,"homes_scanned":[' \
     "$RECLAIMED" "$REFUSED" "$RESERVED" "$IN_USE" \
     "$([ "$OPT_DRY_RUN" = 1 ] && echo true || echo false)" \
-    "${CFG_DEFAULT_RESERVE:-${OPT_RESERVE:-$DEFAULT_RESERVE}}" "$MIN_IDLE_HOURS"
+    "$RESERVE_DEFAULT" "$MIN_IDLE_HOURS"
   for i in ${SCANNED_HOMES+"${!SCANNED_HOMES[@]}"}; do
     [ "$first" = 1 ] || printf ','
     printf '"%s"' "$(json_escape "${SCANNED_HOMES[$i]}")"
