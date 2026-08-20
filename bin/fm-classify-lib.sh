@@ -70,6 +70,15 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
+# How long a busy pane may go with no completed turn before the watcher routes it
+# through the wedge timer. fm-watch.sh owns what the bound MEANS and how it is
+# applied; the value lives here beside the other supervision cadences so it has
+# one definition a consumer can read rather than restate. That includes tests:
+# bracketing this bound behaviorally needs the number, and a test that spells
+# 3600 out itself goes quietly wrong the day the default moves.
+# shellcheck disable=SC2034 # Read by the watcher (fm-watch.sh), not this lib.
+FM_BUSY_TURN_MAX_SECS_DEFAULT=3600
+
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
 # status decision opened by needs-decision or blocked. See status_open_decisions
 # below for the status-fold contract. The transfer verb is written only after

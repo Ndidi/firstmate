@@ -159,7 +159,7 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # an automatic interrupt, signal, or restart. A completed turn touches
 # turn-ended and resets the age. Set generously above any legitimate interval
 # between completed turns, including long tool calls, builds, or test runs.
-BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
+BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-$FM_BUSY_TURN_MAX_SECS_DEFAULT}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same

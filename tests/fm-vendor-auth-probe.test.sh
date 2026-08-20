@@ -73,7 +73,7 @@ case "${FM_FAKE_GROK_MODE:-authenticated}" in
     printf '\n%s\n' 'You are logged in with grok.com.'
     ;;
   empty) : ;;
-  hang) sleep 30 ;;
+  hang) sleep "${FM_FAKE_GROK_HANG_SECS:?}" ;;
 esac
 # grok 0.2.117 exits 0 whether or not the session authenticates; the fake keeps
 # that property so a regression to exit-status reading fails here.
@@ -281,21 +281,35 @@ test_missing_vendor_cli_is_reported_not_assumed() {
 
 # --- the bounded, non-destructive envelope ----------------------------------
 
+# How long the hang fake blocks. This is the test's OWN fixture constant, and it
+# is the only number the bound assertions below need: a probe that comes back
+# BEFORE the fake would have finished was bounded, whatever the bound's value.
+#
+# The previous "took less than 28s against the 20s default" spelled firstmate's
+# default out here, which fails the wrong way round - raise that default to 40
+# and the assertion starts reporting a bug in the probe rather than its own
+# staleness. Comparing against the fake instead means the value of the default
+# is never restated, and a default that outgrows this fixture fails loudly on
+# the status field (the fake returns real output, so the status is no longer
+# `timeout`) rather than quietly.
+FAKE_GROK_HANG_SECS=30
+export FM_FAKE_GROK_HANG_SECS=$FAKE_GROK_HANG_SECS
+
 test_hanging_probe_is_bounded_and_reported() {
   local started finished
   started=$(date +%s)
   run_probe grok-hang grok -- "FM_FAKE_GROK_MODE=hang" "FM_VENDOR_AUTH_PROBE_TIMEOUT=2"
   finished=$(date +%s)
   assert_field "$RUN_LINE" status timeout "a hit bound must be reported as a timeout"
-  [ $((finished - started)) -lt 25 ] \
-    || fail "the probe was not bounded: took $((finished - started))s against a 2s bound"
+  [ $((finished - started)) -lt "$FAKE_GROK_HANG_SECS" ] \
+    || fail "the probe was not bounded: took $((finished - started))s against a 2s bound, and the ${FAKE_GROK_HANG_SECS}s fake could have run to completion"
   pass "a hanging vendor CLI is hard-bounded, reported, and cannot wedge an intake"
 }
 
 # `timeout 0` and the Perl fallback's `alarm 0` both mean "no deadline", so a
 # zero bound passed through would silently remove the hard bound entirely. The
-# fake hangs for 30s, longer than the 20s default it must fall back to, so the
-# two outcomes are distinguishable.
+# fake blocks longer than any bound the probe should fall back to, so "returned
+# a timeout at all" separates a real fallback bound from no bound.
 test_zero_bound_falls_back_to_a_real_bound() {
   local started finished value
   for value in 0 00; do
@@ -303,8 +317,8 @@ test_zero_bound_falls_back_to_a_real_bound() {
     run_probe "bound-zero-$value" grok -- "FM_FAKE_GROK_MODE=hang" "FM_VENDOR_AUTH_PROBE_TIMEOUT=$value"
     finished=$(date +%s)
     assert_field "$RUN_LINE" status timeout "a zero bound must fall back to the default bound, not to no bound"
-    [ $((finished - started)) -lt 28 ] \
-      || fail "a zero bound removed the hard bound: took $((finished - started))s"
+    [ $((finished - started)) -lt "$FAKE_GROK_HANG_SECS" ] \
+      || fail "a zero bound removed the hard bound: took $((finished - started))s, as long as the ${FAKE_GROK_HANG_SECS}s fake itself"
   done
   pass "zero and all-zero bounds fall back to the default instead of removing the hard bound"
 }

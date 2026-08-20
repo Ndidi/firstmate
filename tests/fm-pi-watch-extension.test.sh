@@ -1338,7 +1338,21 @@ const hooks = await mod.FmPrimaryWatchArm({
 const event = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, "999999\n");
 await hooks.event(event);
-await new Promise((resolve) => setTimeout(resolve, 120));
+// The event hook fires ensureArm and returns without awaiting it, so the
+// foreign-lock refusal is still in flight here. Awaiting the coordinator is the
+// barrier: ensureArm serializes on launchInFlight, so this call either joins the
+// hook's own attempt or starts after it finished - either way it cannot resolve
+// until that attempt has decided, and it resolves WITH the decision. A fixed
+// settle in its place is a race against the plugin's git and ps probes (~136ms
+// on a loaded machine, past the 120ms this used to allow); losing that race left
+// the second event absorbed into the still-in-flight first one, so the arm never
+// ran and the test failed for the machine's speed rather than the plugin's
+// behavior.
+const refusal = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
+if (refusal !== "read-only") {
+  console.error(`expected read-only while another pid owns the lock, got ${refusal}`);
+  process.exit(1);
+}
 if (existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm ran without owning the session lock");
   process.exit(1);
@@ -1389,8 +1403,10 @@ await mod.FmPrimaryWatchArm({
   worktree: process.env.WORKTREE,
 });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+// Awaited, so the coordinator has already reached its verdict; the settle this
+// replaces bought nothing, because a not-primary verdict is returned before any
+// arm child is spawned and no later path can create the log.
 const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
-await new Promise((resolve) => setTimeout(resolve, 120));
 if (status !== "not-primary") {
   console.error(`expected not-primary, got ${status}`);
   process.exit(1);

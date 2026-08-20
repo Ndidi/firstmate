@@ -5,6 +5,12 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# The budget default belongs to the library that publishes it, so read it from
+# there rather than writing the number out again. A test that spells the default
+# itself keeps passing after the default moves, and reports the drift as a
+# bootstrap bug rather than as its own staleness.
+# shellcheck source=bin/fm-startup-memory-budget-lib.sh
+. "$ROOT/bin/fm-startup-memory-budget-lib.sh"
 
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-startup-memory-budget)
@@ -101,9 +107,9 @@ test_primary_bootstrap_materializes_visible_default() {
 
   out=$(run_bootstrap "$root" "$home" "$fakebin")
   [ -z "$out" ] || fail "default materialization should stay quiet, got: $out"
-  [ "$(<"$home/config/startup-memory-budget")" = 7500 ] \
-    || fail "bootstrap did not materialize the visible 7500 default"
-  [ "$(FM_HOME="$home" "$BUDGET" read)" = 7500 ] \
+  [ "$(<"$home/config/startup-memory-budget")" = "$FM_STARTUP_MEMORY_BUDGET_DEFAULT" ] \
+    || fail "bootstrap did not materialize the visible $FM_STARTUP_MEMORY_BUDGET_DEFAULT default"
+  [ "$(FM_HOME="$home" "$BUDGET" read)" = "$FM_STARTUP_MEMORY_BUDGET_DEFAULT" ] \
     || fail "read command did not expose the generated default"
 
   printf '321\n' > "$home/config/startup-memory-budget"

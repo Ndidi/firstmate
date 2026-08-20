@@ -195,7 +195,7 @@ expect_failure() {
 # non-ASCII characters, and control characters must never survive into the typed
 # event or the thread.
 test_outcome_text_is_bounded_without_corrupting_characters() {
-  local home event text long
+  local home event text long bound
   home=$(make_home outcome-text)
   seed_commitment "$home" pf-text req-text discord main work-text
 
@@ -221,7 +221,16 @@ test_outcome_text_is_bounded_without_corrupting_characters() {
   event=$(find "$home/state/public-followup/events" -name '*.json' | head -1)
   text=$(jq -r '.public_safe_outcome' "$event") \
     || fail "an over-long outcome must still produce valid JSON"
-  [ "${#text}" -le 600 ] || fail "the outcome text was not bounded, got ${#text} characters"
+  # Read the bound from the library that owns it rather than restating 600. A
+  # literal here still passes if the real bound TIGHTENS, so the assertion would
+  # quietly stop proving the cap it names.
+  # env -u so an inherited override cannot be read back as "the default".
+  # shellcheck disable=SC2016 # The library, not this shell, expands the name.
+  bound=$(env -u FM_PF_OUTCOME_TEXT_MAX bash -c '. "$1"; printf %s "$FM_PF_OUTCOME_TEXT_MAX"' _ "$ROOT/bin/fm-public-followup-lib.sh")
+  [ "${#text}" -le "$bound" ] \
+    || fail "the outcome text was not bounded to $bound, got ${#text} characters"
+  [ "${#text}" -eq "$bound" ] \
+    || fail "a 5000-character outcome must be truncated exactly to the $bound-codepoint bound, got ${#text}"
   case "$text" in
     *[!é]*) fail "codepoint bounding split a multi-byte character" ;;
   esac

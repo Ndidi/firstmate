@@ -1783,7 +1783,11 @@ EOF
   # actually matters: once BOTH deadlines have passed, nothing hung is left.
   FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_STARTUP_NETWORK_TIMEOUT=2 \
     "$ROOT/bin/fm-startup-network.sh" wait 30 >/dev/null || true
-  sleep 1
+  # Reaping is an event, so wait for it. A fixed second both under-waits on a
+  # loaded machine (reporting a slow reap as a leak) and over-waits on every run
+  # where the bound had already cleaned up.
+  # shellcheck disable=SC2016 # Deliberate: the inner shell (or the deferred --saw snippet) expands these, not this one.
+  fm_wait_probe -t 30 sh -c '[ "$(pgrep -f "$1" 2>/dev/null | wc -l | tr -d " ")" -eq 0 ]' _ "$fakebin/git"
   stray=$(pgrep -f "$fakebin/git" 2>/dev/null | wc -l | tr -d ' ')
   [ "$stray" -eq 0 ] || fail "the runtime bound left $stray hung subprocess(es) behind"
 

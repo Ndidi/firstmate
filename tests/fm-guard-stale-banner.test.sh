@@ -10,6 +10,12 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# Whole-second mtime, the granularity `stat` reports and therefore the only one
+# the banner's episode key can observe.
+beat_mtime() {
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
 TMP_ROOT=$(fm_test_tmproot fm-guard-stale-banner)
 
 make_guard_case() {
@@ -407,10 +413,19 @@ test_persistent_no_watcher_episode_survives_beacon_touch() {
     || fail "first persistent no-watcher call did not print the full banner: $out1"
   # The beacon mtime advancing with NO live watcher must not split the continuous
   # down-episode. The old beacon-mtime episode key re-printed the full banner
-  # here; the reason-based key keeps it a single episode. Separate the touches by
-  # a second so the mtime genuinely changes at whole-second stat granularity.
-  sleep 1
-  touch "$home/state/.last-watcher-beat"
+  # here; the reason-based key keeps it a single episode. The mtime must
+  # genuinely CHANGE, and stat reports it in whole seconds, so a second touch
+  # inside the same second is a no-op the assertion cannot see.
+  #
+  # Wait for the change itself rather than for the second that usually produces
+  # it: the probe re-touches on each pass and ends as soon as the recorded second
+  # differs, which beats a full second on every run and stays correct under a
+  # coarser timestamp granularity than this comment assumes.
+  # shellcheck disable=SC2016 # Deliberate: the inner shell (or the deferred --saw snippet) expands these, not this one.
+  fm_wait_until --saw 'beat_mtime "$home/state/.last-watcher-beat"' \
+    'the beacon mtime to advance to a new whole second' \
+    sh -c 'touch "$1"; [ "$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)" != "$2" ]' \
+    _ "$home/state/.last-watcher-beat" "$(beat_mtime "$home/state/.last-watcher-beat")"
   out2=$(run_guard_case "$dir")
   [ "$(count_text "$out2" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 0 ] \
     || fail "advancing the beacon mtime with no live watcher re-printed the banner: $out2"

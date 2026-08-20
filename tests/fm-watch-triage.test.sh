@@ -52,6 +52,10 @@ watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
 }
 
 # Wait up to <limit> 0.1s ticks while <pid> stays alive; 0 if still alive, 1 if it died.
+# A fixed stretch of clock proves only that the process had not exited YET, so
+# this is reserved for a subject with no observable progress signal (a one-shot
+# drain). For the watcher itself use wait_watcher_cycles, which waits on evidence
+# of completed work instead.
 wait_live() {
   local pid=$1 limit=${2:-30} i=0
   while [ "$i" -lt "$limit" ]; do
@@ -60,6 +64,56 @@ wait_live() {
     i=$((i + 1))
   done
   return 0
+}
+
+# Beacon signature at sub-second resolution. seen_sig/file_mtime report whole
+# seconds, which cannot tell two poll bodies apart inside the same second.
+beat_sig() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f '%Fm' "$1" 2>/dev/null
+  else
+    stat -c '%.9Y' "$1" 2>/dev/null
+  fi
+}
+
+# wait_watcher_cycles <state> <pid> [cycles]
+# Wait until the watcher has completed <cycles> full poll bodies without exiting;
+# 0 once it has, 1 the moment <pid> dies, and a named failure at the deadline.
+#
+# This is the "did it absorb the wake and keep going" proof, and it is evidence
+# rather than elapsed time: fm-watch.sh touches state/.last-watcher-beat at the
+# top of every poll body, so each observed change means one more complete body
+# ran and did not choose to exit. The fixed three seconds this replaces proved
+# nothing of the sort - on a loaded machine three seconds need not cover even one
+# poll, and the assertion that follows would then hold only because the watcher
+# had not looked yet. It is also the faster of the two whenever the machine is
+# healthy, because it stops at the evidence instead of at the clock.
+wait_watcher_cycles() {  # <state> <pid> [cycles]
+  local state=$1 pid=$2 cycles=${3:-2} beat deadline seen=0 last='' sig started
+  beat="$state/.last-watcher-beat"
+  started=$(date +%s%N)
+  deadline=$(($(date +%s) + FM_TEST_WAIT_TIMEOUT))
+  while :; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      fm_wait_trace "$started" exited "watcher poll cycles"
+      return 1
+    fi
+    sig=$(beat_sig "$beat")
+    if [ -n "$sig" ] && [ "$sig" != "$last" ]; then
+      [ -z "$last" ] || seen=$((seen + 1))
+      last=$sig
+      if [ "$seen" -ge "$cycles" ]; then
+        fm_wait_trace "$started" held "$cycles watcher poll cycles"
+        return 0
+      fi
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      fm_wait_timeout "$FM_TEST_WAIT_TIMEOUT" \
+        "the watcher to complete $cycles poll cycles (saw $seen)" \
+        "$([ -e "$beat" ] && printf 'beacon last touched %s\n' "$(beat_sig "$beat")" || printf 'beacon %s was never touched\n' "$beat")"
+    fi
+    sleep 0.02
+  done
 }
 
 wait_numeric_file() {
@@ -385,7 +439,7 @@ test_provably_working_signal_absorbed() {
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "watcher exited for a working: signal whose crew is provably working (should absorb): $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "provably-working signal printed a wake reason: $(cat "$out")"
@@ -405,7 +459,7 @@ test_turn_ended_provably_working_absorbed() {
   export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "watcher exited for a turn-end whose crew is provably working (should absorb): $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "provably-working turn-end printed a wake reason: $(cat "$out")"
@@ -493,7 +547,7 @@ test_self_announced_close_does_not_rewake_but_next_note_does() {
   export FM_FAKE_CREW_STATE='state: unknown · source: none · idle worker'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "the home's own bookkeeping close re-woke its own watcher: $(cat "$out")"
   fi
   [ ! -s "$out" ] || { reap "$pid"; fail "self-announced close printed a wake reason: $(cat "$out")"; }
@@ -582,7 +636,7 @@ test_stale_terminal_status_overridden_by_active_run() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "watcher exited for a stale terminal-looking status the run-step overrides (should absorb): $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "the overridden stale terminal status printed a wake reason during absorb"
@@ -636,7 +690,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "watcher exited for a fresh provably-working non-terminal stale (should absorb): $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "fresh provably-working stale printed a wake reason during absorb"
@@ -736,7 +790,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "watcher exited for a fresh declared pause (should absorb): $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "fresh paused stale printed a wake reason during absorb"
@@ -803,7 +857,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
       FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
     pid=$!
-    if wait_live "$pid" 15; then reap "$pid"; else wait "$pid" || fail "dead-agent watcher round $round failed"; fi
+    if wait_watcher_cycles "$state" "$pid"; then reap "$pid"; else wait "$pid" || fail "dead-agent watcher round $round failed"; fi
     round=$((round + 1))
   done
   wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
@@ -868,7 +922,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"
     fail "live external-decision gate escalated on the wedge timer after its immediate surface: $(cat "$out")"
   fi
@@ -927,7 +981,7 @@ test_secondmate_nonpaused_stale_remains_suppressed() {
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "watcher surfaced an ordinary secondmate stale pane: $(cat "$out")"
   fi
   [ ! -s "$out" ] || { reap "$pid"; fail "ordinary secondmate stale pane printed a wake reason: $(cat "$out")"; }
@@ -953,7 +1007,7 @@ test_secondmate_unpause_clears_pause_tracking() {
   : > "$state/.wedge-escalations-$key"
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  wait_live "$pid" 20 || fail "watcher exited while reconciling a resumed secondmate: $(cat "$out")"
+  wait_watcher_cycles "$state" "$pid" || fail "watcher exited while reconciling a resumed secondmate: $(cat "$out")"
   [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "resumed secondmate retained the pause marker"; }
   [ ! -e "$state/.stale-$key" ] || { reap "$pid"; fail "resumed secondmate retained stale tracking"; }
   [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "resumed secondmate retained wedge tracking"; }
@@ -991,7 +1045,7 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
   kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "a stale hash that entered pause was wedge-escalated: $(cat "$out")"; }
   [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "unchanged stale hash did not enter paused mode"; }
   [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "pause transition retained its wedge timer"; }
-  wait_live "$pid" 30 || { reap "$pid"; fail "a stale hash that entered pause was wedge-escalated: $(cat "$out")"; }
+  wait_watcher_cycles "$state" "$pid" || { reap "$pid"; fail "a stale hash that entered pause was wedge-escalated: $(cat "$out")"; }
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional entered-pause watcher stop"
 
@@ -1012,7 +1066,7 @@ test_nonterminal_stale_pause_transitions_reclassify_unchanged_hash() {
   kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "a stale hash that left pause did not resume wedge tracking: $(cat "$out")"; }
   [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "unchanged stale hash retained paused mode after resume"; }
   [ -s "$state/.stale-since-$key" ] || { reap "$pid"; fail "unchanged stale hash did not restart wedge tracking after resume"; }
-  wait_live "$pid" 30 || { reap "$pid"; fail "a stale hash that left pause did not resume wedge tracking: $(cat "$out")"; }
+  wait_watcher_cycles "$state" "$pid" || { reap "$pid"; fail "a stale hash that left pause did not resume wedge tracking: $(cat "$out")"; }
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "unchanged stale hashes reclassify when a crew enters or leaves pause"
@@ -1038,7 +1092,7 @@ test_nonterminal_paused_rechecks_authoritative_state() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "an active run behind a declared pause surfaced instead of resuming wedge tracking: $(cat "$out")"
   fi
   [ ! -e "$state/.paused-$key" ] || { reap "$pid"; fail "authoritative active run retained paused mode"; }
@@ -1070,7 +1124,11 @@ test_paused_authoritative_working_preserves_wedge_timer() {
   pid=$!
   wait_numeric_file "$state/.stale-since-$key" 30 || { reap "$pid"; fail "authoritative working state did not start wedge tracking"; }
   since=$(cat "$state/.stale-since-$key")
-  sleep 2
+  # Let further rechecks actually run before claiming they left the timer alone.
+  # Two fixed seconds could pass without a single recheck on a slow machine, and
+  # the assertion below would then hold because nothing had looked yet.
+  wait_watcher_cycles "$state" "$pid" \
+    || { reap "$pid"; fail "the watcher exited before repeating its authoritative-working recheck"; }
   [ "$(cat "$state/.stale-since-$key" 2>/dev/null || true)" = "$since" ] \
     || { reap "$pid"; fail "repeat authoritative working recheck reset the wedge timer"; }
   reap "$pid"
@@ -1123,7 +1181,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "watcher exited on the priming round (should absorb): $(cat "$out")"
   fi
   reap "$pid"
@@ -1179,7 +1237,7 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "watcher exited on a fresh (changed) pane hash: $(cat "$out")"
   fi
   [ ! -e "$state/.wedge-escalations-$key" ] || fail "a changed pane hash did not reset the wedge-escalation counter"
@@ -1216,7 +1274,7 @@ test_busy_pane_below_turn_age_bound_is_absorbed() {
     FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=999 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "a busy pane below the turn-age bound was escalated: $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "a busy pane below the turn-age bound printed a wake reason"
@@ -1247,7 +1305,7 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
     FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "a stable-hash busy pane past the turn-age bound escalated before the wedge threshold: $(cat "$out")"
   fi
   [ -s "$state/.stale-since-$key" ] || fail "a stable-hash busy pane past the turn-age bound did not start a wedge timer"
@@ -1290,7 +1348,7 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound() {
     FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "a changing-hash busy pane past the turn-age bound escalated before the wedge threshold: $(cat "$out")"
   fi
   [ -s "$state/.stale-since-$key" ] || fail "a changing-hash busy pane past the turn-age bound did not start a wedge timer"
@@ -1336,7 +1394,7 @@ test_busy_pane_turn_end_touch_resets_age() {
     FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=3600 FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "a freshly completed turn on a busy pane was still escalated: $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "a freshly completed turn on a busy pane printed a wake reason"
@@ -1368,7 +1426,7 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
     FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "priming round for busy turn-age escalation was not absorbed: $(cat "$out")"
   fi
   reap "$pid"
@@ -1396,12 +1454,24 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
   pass "repeated busy turn-age escalations reuse the existing escalation counter and demand deep inspection at the threshold"
 }
 
-# Behavioral proof that the production default (no FM_BUSY_TURN_MAX_SECS override
-# anywhere in this env) is 3600s: a completed turn 5 minutes old must not start a
-# wedge timer, while one 66 minutes old must - bracketing the default around 3600
-# without waiting a literal hour.
-test_busy_pane_default_turn_age_bound_is_3600s() {
+# Behavioral proof of the production busy-turn-age default (no
+# FM_BUSY_TURN_MAX_SECS override anywhere in this env): a completed turn just
+# inside the bound must not start a wedge timer, while one just past it must -
+# bracketing the bound without waiting a literal hour.
+#
+# Both ages are derived from FM_BUSY_TURN_MAX_SECS_DEFAULT (bin/fm-classify-lib.sh,
+# the same constant fm-watch.sh resolves the bound from) rather than written out.
+# Restating the number here would make this test pass vacuously the day the
+# default moves: a bracket of 300s and 4000s still brackets a bound of 600s, and
+# nothing would say so. Deriving it keeps the +/-10% margin around whatever the
+# real default is, so the assertion stays a proof of THAT number.
+test_busy_pane_default_turn_age_bound() {
   local dir state fakebin out capture_file window key pane_hash sig pid
+  local bound margin under over
+  bound=$FM_BUSY_TURN_MAX_SECS_DEFAULT
+  margin=$((bound / 10))
+  under=$((bound - margin))
+  over=$((bound + margin))
   dir=$(make_case busy-default-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-default"
   printf 'Working...' > "$capture_file"
@@ -1414,32 +1484,32 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
 
-  set_mtime $(( $(date +%s) - 300 )) "$state/busy-default.turn-ended"
+  set_mtime $(( $(date +%s) - under )) "$state/busy-default.turn-ended"
   prime_turnend_seen "$state/busy-default.turn-ended"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "a 5-minute-old completed turn tripped the default busy-turn-age bound: $(cat "$out")"
+  if ! wait_watcher_cycles "$state" "$pid"; then
+    reap "$pid"; fail "a completed turn ${under}s old (inside the ${bound}s default bound) tripped it: $(cat "$out")"
   fi
-  [ ! -e "$state/.stale-since-$key" ] || fail "a 5-minute-old completed turn started a wedge timer under the default bound"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a completed turn ${under}s old started a wedge timer inside the ${bound}s default bound"
   reap "$pid"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional five-minute-bound stop"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional inside-the-bound stop"
 
-  set_mtime $(( $(date +%s) - 4000 )) "$state/busy-default.turn-ended"
+  set_mtime $(( $(date +%s) - over )) "$state/busy-default.turn-ended"
   prime_turnend_seen "$state/busy-default.turn-ended"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "a 66-minute-old completed turn escalated before the wedge threshold under the default bound: $(cat "$out")"
+  if ! wait_watcher_cycles "$state" "$pid"; then
+    reap "$pid"; fail "a completed turn ${over}s old escalated before the wedge threshold: $(cat "$out")"
   fi
-  [ -s "$state/.stale-since-$key" ] || fail "a 66-minute-old completed turn did not start a wedge timer under the default bound (default is not 3600s)"
+  [ -s "$state/.stale-since-$key" ] || fail "a completed turn ${over}s old did not start a wedge timer, so the default busy-turn-age bound is not ${bound}s"
   reap "$pid"
-  pass "the production default busy-turn-age bound is 3600s (5min under does not wedge, 66min over does)"
+  pass "the production default busy-turn-age bound is ${bound}s (${under}s does not wedge, ${over}s does)"
 }
 
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
@@ -1512,7 +1582,7 @@ SH
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_WATCH_TRIAGE_LOG_MAX_BYTES=1 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "watcher exited for a benign signal while testing log capping: $(cat "$out")"
   fi
   i=0
@@ -1635,7 +1705,7 @@ test_procevent_unacknowledged_result_redrains_until_handled() {
   : > "$out"
   procevent_watch_bg "$dir" "$out"
   pid=$!
-  if ! wait_live "$pid" 40; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     fail "a handled process-event result woke the watcher: $(cat "$out")"
   fi
   reap "$pid"
@@ -1804,7 +1874,7 @@ test_heartbeat_no_change_absorbed() {
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_live "$pid" 30; then
+  if ! wait_watcher_cycles "$state" "$pid"; then
     reap "$pid"; fail "watcher exited for a no-change heartbeat (should absorb): $(cat "$out")"
   fi
   [ ! -s "$out" ] || fail "no-change heartbeat printed a wake reason: $(cat "$out")"
@@ -1848,11 +1918,11 @@ test_beacon_stays_fresh_while_absorbing() {
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
-  wait_live "$pid" 15 || { reap "$pid"; fail "watcher exited while absorbing the first benign signal"; }
+  wait_watcher_cycles "$state" "$pid" || { reap "$pid"; fail "watcher exited while absorbing the first benign signal"; }
   m1=$(file_mtime "$state/.last-watcher-beat")
   # A second benign signal keeps it absorbing; the beacon must keep advancing.
   printf 'working: b\n' >> "$status_file"
-  wait_live "$pid" 20 || { reap "$pid"; fail "watcher exited while absorbing a second benign signal"; }
+  wait_watcher_cycles "$state" "$pid" || { reap "$pid"; fail "watcher exited while absorbing a second benign signal"; }
   m2=$(file_mtime "$state/.last-watcher-beat")
   now=$(date +%s)
   if [ -z "$m1" ] || [ -z "$m2" ]; then
@@ -1951,7 +2021,7 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
-test_busy_pane_default_turn_age_bound_is_3600s
+test_busy_pane_default_turn_age_bound
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces

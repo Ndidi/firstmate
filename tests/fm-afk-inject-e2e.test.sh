@@ -47,6 +47,10 @@ LOOP_SCRIPT=
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
+# Sourced AFTER fail() so the helpers report through this file's own cleanup.
+# shellcheck source=tests/wait-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/wait-helpers.sh"
+
 cleanup_all() {
   if [ -n "${DAEMON_PID:-}" ]; then
     afk_exit "${STATE_DIR:-}" 2>/dev/null || true
@@ -135,7 +139,14 @@ chmod +x "$LOOP_SCRIPT"
 # Start the loop in the supervisor pane.
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" \
   "bash '$LOOP_SCRIPT' '$LOG_FILE'" Enter
-sleep 1  # let the loop start and settle
+# The loop draws its own prompt glyph on entry, so that glyph IS the "it is
+# running" signal. A fixed second was a guess in both directions: too short on a
+# cold machine (every later assertion then races a pane with no reader) and pure
+# waste on a warm one.
+# shellcheck disable=SC2016 # Deliberate: the inner shell (or the deferred --saw snippet) expands these, not this one.
+fm_wait_until 'the supervisor loop to draw its prompt' \
+  sh -c '"$1" -L "$2" capture-pane -p -t "$3" 2>/dev/null | grep -q "$4"' \
+  _ "$REAL_TMUX" "$SOCKET" "$SUPERVISOR_PANE" "$(printf '\xe2\x9d\xaf')"
 
 # tmux shim: redirects bare `tmux` to the private socket. Optionally swallows
 # the first Enter (file-based flag) for Scenario B.
@@ -245,6 +256,69 @@ selfcheck_pane_input_pending() {
   fail "pane_input_pending self-check failed"
 }
 
+# --- observing the daemon's own progress records -----------------------------
+#
+# Every wait below reads a record the daemon writes for itself, so the test stops
+# when the daemon has provably reached the step under assertion rather than when
+# a chosen number of seconds has passed. That difference is what lets the
+# negative assertions ("the digest was NOT injected") mean something: the old
+# fixed settles could not distinguish "the daemon decided to defer" from "the
+# daemon had not looked yet", and would have passed either way.
+
+# One housekeeping stamp value, or 0 before the first pass.
+housekeep_stamp() {
+  cat "$STATE_DIR/.subsuper-last-housekeep" 2>/dev/null || printf '0\n'
+}
+
+# Wait until a housekeeping pass has run start to finish after <since>. The
+# daemon stamps the file BEFORE running the pass, so one stamp at or after
+# <since> only proves a pass started; the NEXT stamp is what proves that pass
+# returned. Both are needed to claim a flush was attempted and declined.
+wait_for_completed_housekeeping() {  # <since-epoch>
+  local since=$1 first
+  # shellcheck disable=SC2016 # Deliberate: the inner shell (or the deferred --saw snippet) expands these, not this one.
+  fm_wait_until --saw 'housekeep_stamp' \
+    "a housekeeping pass to begin after ${since}" \
+    sh -c '[ "$(cat "$1" 2>/dev/null || echo 0)" -ge "$2" ]' \
+    _ "$STATE_DIR/.subsuper-last-housekeep" "$since"
+  first=$(housekeep_stamp)
+  # shellcheck disable=SC2016 # Deliberate: the inner shell (or the deferred --saw snippet) expands these, not this one.
+  fm_wait_until --saw 'housekeep_stamp' \
+    "the housekeeping pass stamped ${first} to complete" \
+    sh -c '[ "$(cat "$1" 2>/dev/null || echo 0)" -gt "$2" ]' \
+    _ "$STATE_DIR/.subsuper-last-housekeep" "$first"
+}
+
+# Wait until the daemon has buffered an escalation AND declined to deliver it.
+# The buffer is the daemon's record that it saw the status; a complete
+# housekeeping pass afterwards is its record that the flush ran and left the
+# buffer in place.
+wait_for_deferred_escalation() {
+  local buffered_at
+  fm_wait_nonempty "$STATE_DIR/.subsuper-escalations" \
+    'the daemon to buffer the escalation it must defer'
+  buffered_at=$(date +%s)
+  wait_for_completed_housekeeping "$buffered_at"
+}
+
+# Wait until a digest reached the pane AND the daemon confirmed the submit.
+# escalate_flush empties the buffer only after inject_msg confirms, so an empty
+# buffer alongside a logged digest is the daemon's own "delivered" receipt.
+wait_for_delivered_digest() {
+  fm_wait_grep 'Supervisor escalate' "$LOG_FILE" \
+    'the digest to reach the supervisor pane'
+  # shellcheck disable=SC2016 # Deliberate: the inner shell (or the deferred --saw snippet) expands these, not this one.
+  fm_wait_until --saw 'cat "$STATE_DIR/.subsuper-escalations" 2>/dev/null' \
+    'the daemon to confirm the submit and clear its escalation buffer' \
+    test '!' -s "$STATE_DIR/.subsuper-escalations"
+}
+
+# One housekeeping tick, spent proving a duplicate did NOT follow a delivered
+# digest. "Exactly one" is the only claim here that no record can settle: a
+# second submission would look identical to a first that has not happened yet,
+# so the tick that could produce it has to be given the chance to fire.
+DUPLICATE_WINDOW_SECS=2
+
 wait_for_pane_input_pending() {
   local i=0
   while [ "$i" -lt 30 ]; do
@@ -276,8 +350,11 @@ test_scenario_a() {
   # real watcher child.
   echo "done: PR https://example.test/pr/100" > "$STATE_DIR/fake-c1.status"
 
-  # Wait for the watcher to detect the change and the daemon to attempt inject.
-  sleep 6
+  # Wait until the daemon has buffered the escalation and run a full flush pass
+  # without delivering it. Six fixed seconds could not tell a deferral apart from
+  # a daemon that simply had not reached the flush yet, so the assertion below
+  # would have held for the wrong reason on a slow machine.
+  wait_for_deferred_escalation
 
   # Assert: the digest was NOT injected while the pane had pending input.
   if grep -q 'Supervisor escalate' "$LOG_FILE"; then
@@ -292,18 +369,13 @@ test_scenario_a() {
 
   # Now submit the human's text (Enter). The pane goes idle.
   "$REAL_TMUX" -L "$SOCKET" send-keys -t "$SUPERVISOR_PANE" Enter
-  sleep 0.5
 
-  # Wait for the daemon to retry injection (housekeeping tick = 1s).
-  sleep 6
-
-  # Assert: human text was submitted alone (as a user message).
-  grep -q 'human draft text' "$LOG_FILE" \
-    || fail "Scenario A: human text not in log after submit"
-
-  # Assert: digest arrived after the pane went idle.
-  grep -q 'Supervisor escalate' "$LOG_FILE" \
-    || fail "Scenario A: digest not injected after pane went idle"
+  # The loop logs the human line on submit, and the daemon retries its deferred
+  # inject once the pane is idle. Both are observable, so wait for each rather
+  # than for a settle long enough to cover the slower of the two.
+  fm_wait_grep 'human draft text' "$LOG_FILE" \
+    'the submitted human line to reach the log'
+  wait_for_delivered_digest
 
   # Assert: human text and digest are on SEPARATE lines (never merged).
   if grep -q 'human draft text.*Supervisor escalate' "$LOG_FILE" || \
@@ -345,9 +417,12 @@ test_scenario_b() {
   # Write a captain-relevant status to trigger a real escalation.
   echo "done: PR https://example.test/pr/200" > "$STATE_DIR/fake-c1.status"
 
-  # Wait for the daemon to process the escalation and attempt inject (with the
-  # swallowed Enter, the retry path fires).
-  sleep 8
+  # With the Enter swallowed, delivery only completes once the daemon retries.
+  # Waiting for its own delivery receipt covers that retry however long it takes,
+  # instead of guessing a settle wide enough to contain it.
+  wait_for_delivered_digest
+  fm_settle "$DUPLICATE_WINDOW_SECS" \
+    'a duplicate submission could only arrive on a later housekeeping tick, and no record distinguishes "no duplicate" from "no duplicate yet"'
 
   # Assert: exactly ONE terminal-safe marker in the log (no duplicate, no loss).
   local marker_count
@@ -389,7 +464,9 @@ test_scenario_c() {
   start_daemon
 
   echo "done: PR https://example.test/pr/300" > "$STATE_DIR/fake-c1.status"
-  sleep 6
+  wait_for_delivered_digest
+  fm_settle "$DUPLICATE_WINDOW_SECS" \
+    'a duplicate submission could only arrive on a later housekeeping tick, and no record distinguishes "no duplicate" from "no duplicate yet"'
 
   # Exactly one terminal-safe marker in the submitted log (no duplicate, no loss).
   local marker_count

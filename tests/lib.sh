@@ -340,3 +340,11 @@ assert_absent() {
 assert_present() {
   [ -e "$1" ] || fail "$2"
 }
+
+# --- wait-until-true --------------------------------------------------------
+#
+# Sourced last so tests/wait-helpers.sh can use fail() at call time. It owns the
+# poll-until-the-condition-holds primitives that replace fixed settle sleeps;
+# every test that already sources this library gets them with no extra line.
+# shellcheck source=tests/wait-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/wait-helpers.sh"

@@ -103,6 +103,10 @@ Family selection is the ordinary local path; `--all` is deliberate full regressi
 CI owns broad regression across required portable parallel shards, the portable serial lane's separate-runner shards, the Herdr lane, lint, invariants, the coverage guard, and stock macOS Bash compatibility in [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 Use `bin/fm-test-run.sh --list-lanes` for exact lane names and `--help` for `--jobs` rules and required gate-skip flags when reproducing a lane locally.
 Discover tests by listing `tests/*.test.sh`: each is a self-contained bash script named `<subject>.test.sh`, and its header comment describes what it covers, so pass one to `bin/fm-test-run.sh` to focus on a subject with canonical timing output.
+Never wait for a test's subject with a fixed `sleep`: [`tests/wait-helpers.sh`](tests/wait-helpers.sh) owns the wait-until-the-condition-holds primitives, and `tests/lib.sh` sources it so any test that sources the library already has them.
+A fixed settle is wrong in both directions - too short and the assertion becomes a coin flip decided by machine load, too long and every run pays the worst case - and its header owns the rules that keep a conversion honest, including how to handle an assertion that something did NOT happen.
+Set `FM_TEST_WAIT_TRACE=1` on a run to see what each wait waited for and how long it actually took.
+
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
 The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the lane's isolation boundary, while [runtime backend verification](docs/verification/runtime-backends.md#herdr) owns active empirical evidence; live harness credential tests remain opt-in.
 
