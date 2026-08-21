@@ -47,6 +47,12 @@ export FM_POOL_ROOT="${FM_POOL_ROOT:-/nonexistent/fm-test-pool-root}"
 # shellcheck disable=SC2034
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Per-case dependency skips (fm_require_tool / fm_require / fm_test_skip). Loaded
+# for every test because a missing dependency must report as a named skip rather
+# than a failure wherever it is found, not only in files that remembered to ask.
+# shellcheck source=tests/require.sh
+. "$(dirname "${BASH_SOURCE[0]}")/require.sh"
+
 # --- reporters --------------------------------------------------------------
 
 fail() {

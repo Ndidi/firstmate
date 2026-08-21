@@ -49,7 +49,9 @@
 #   FM_TEST_END <iso8601> <script> exit=<code> duration_ms=<n> gate_skip=<true|false>
 #
 # After all scripts (stdout):
-#   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> duration_ms=<n>
+#   FM_TEST_SUMMARY total=<n> failed=<n> skipped_gate=<n> skipped_case=<n> quarantined=<n> duration_ms=<n>
+#   FM_TEST_SKIP <script> <case>: <specific missing requirement>
+#   FM_TEST_QUARANTINED <script> <already-known assertion>
 #   FM_TEST_SUMMARY_FAMILY family=<name> count=<n> duration_ms=<n> failed=<n>
 #   FM_TEST_SLOWEST rank=<k> script=<path> duration_ms=<n>
 #
@@ -147,7 +149,7 @@ family_for_basename() {
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|fm-wait-helpers.test.sh|\
-    fm-test-run.test.sh|fm-test-isolation-proof.test.sh)
+    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-test-verdict.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
@@ -858,8 +860,16 @@ families_for_changed_path() {
       # resolution in the caller; emit a marker family of __script__
       printf '%s\n' "__script__:$(basename "$path")"
       ;;
-    bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh)
+    bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh|bin/fm-test-quarantine.sh|tests/quarantine.tsv)
       printf '%s\n' pure-contract-unit
+      ;;
+    # Tool identity decides whether a required tool counts as installed, so it
+    # reaches bootstrap's detection, backend dispatch, and the Orca gate.
+    bin/fm-tool-identity-lib.sh)
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' session-bootstrap
+      printf '%s\n' backend-dispatch
+      printf '%s\n' orca
       ;;
     bin/backends/herdr*|bin/fm-herdr-lab.sh|tests/herdr-test-safety.sh)
       printf '%s\n' real-herdr-gated
@@ -996,6 +1006,12 @@ families_for_changed_path() {
       ;;
     tests/lib.sh|tests/*-helpers.sh)
       families_for_test_reference "$(basename "$path")" \
+        || printf '%s\n' "__unmapped__:$path"
+      ;;
+    # Sourced by tests/lib.sh rather than named by any test, so it reaches
+    # exactly the suites lib.sh reaches.
+    tests/require.sh)
+      families_for_test_reference lib.sh \
         || printf '%s\n' "__unmapped__:$path"
       ;;
     tests/fixtures/*/*)
@@ -1425,7 +1441,7 @@ fi
 
 if [ "${#SCRIPTS[@]}" -eq 0 ]; then
   log "nothing to run"
-  printf 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 duration_ms=0\n'
+  printf 'FM_TEST_SUMMARY total=0 failed=0 skipped_gate=0 skipped_case=0 quarantined=0 duration_ms=0\n'
   if [ -n "$JSON_PATH" ]; then
     empty_rec=$(mktemp)
     empty_fam=$(mktemp)
@@ -1457,7 +1473,11 @@ fi
 RUN_TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run.XXXXXX")
 RECORDS="$RUN_TMP/records.tsv"
 FAMILIES_TSV="$RUN_TMP/families.tsv"
+SKIPS_TSV="$RUN_TMP/skips.tsv"
+QUARANTINED_TSV="$RUN_TMP/quarantined.tsv"
 : >"$RECORDS"
+: >"$SKIPS_TSV"
+: >"$QUARANTINED_TSV"
 trap 'rm -rf "$RUN_TMP"' EXIT
 
 RUN_STARTED_ISO=$(now_iso)
@@ -1467,6 +1487,12 @@ TOTAL=0
 FAILED=0
 SKIPPED_GATE=0
 AGG_RC=0
+# Verdict accounting. A missing dependency must land as a NAMED skip, and a
+# failure must be either new (fail the run) or already recorded as known.
+# tests/require.sh owns the "skip - <case>: <reason>" marker;
+# bin/fm-test-quarantine.sh owns the register, its ratchet, and its expiry.
+SKIPPED_CASE=0
+QUARANTINED=0
 
 # Family accumulators as TSV lines updated in-memory via temp files.
 # family -> count, duration_ms, failed
@@ -1499,6 +1525,71 @@ family_bump() {
   mv "$tmp" "$FAMILIES_TSV"
 }
 
+# Kept identical to tests/require.sh's FM_TEST_CASES_COMPLETE_MARKER; the runner
+# cannot source tests/lib.sh, so this is the one place the literal is repeated.
+FM_TEST_CASES_COMPLETE_MARKER='# fm-test-cases-complete'
+
+QUARANTINE_BIN="$ROOT/bin/fm-test-quarantine.sh"
+# A fixture may copy this runner alone into a scratch repo - tests/fm-test-run.test.sh
+# does exactly that to exercise the scheduler - and then its owner is not there to
+# ask. Without the owner there is no register to consult, so the run says so once
+# and behaves as it did before the register existed. That direction is strictly
+# STRICTER, never laxer: nothing can be absorbed, so every failure stays a failure.
+QUARANTINE_AVAILABLE=1
+[ -x "$QUARANTINE_BIN" ] || QUARANTINE_AVAILABLE=0
+
+# Record every per-case skip this script reported. Skips are counted and named,
+# never silent: on a machine where the dependency exists the same case runs for
+# real, so an unreported skip would hide a genuine regression behind an
+# environment difference.
+collect_case_skips() {  # <script> <out>
+  local script=$1 out=$2 line
+  while IFS= read -r line; do
+    printf '%s\t%s\n' "$script" "${line#skip - }" >>"$SKIPS_TSV"
+    SKIPPED_CASE=$((SKIPPED_CASE + 1))
+  done < <(grep '^skip - ' "$out" 2>/dev/null || true)
+}
+
+# 0 only when this script failed AND every failure it reported is already a
+# recorded known failure, so the run learned nothing new from it. One unrecorded
+# "not ok" is enough to keep the run red - that is the property that makes a NEW
+# failure still fail the suite even inside an already-quarantined file.
+script_failures_all_quarantined() {  # <script> <out>
+  local script=$1 out=$2 line seen=0 staged="$RUN_TMP/quarantine.staged"
+  [ "$QUARANTINE_AVAILABLE" -eq 1 ] || return 1
+  : >"$staged"
+  while IFS= read -r line; do
+    seen=1
+    "$QUARANTINE_BIN" --match "$script" "${line#not ok - }" >/dev/null 2>&1 || return 1
+    printf '%s\t%s\n' "$script" "${line#not ok - }" >>"$staged"
+  done < <(grep '^not ok - ' "$out" 2>/dev/null || true)
+  # Staged, then committed only on a clean sweep: a partially matched script is
+  # still a failing script, and listing its matched lines would read as though
+  # they had been absorbed.
+  [ "$seen" -eq 1 ] || return 1
+  cat "$staged" >>"$QUARANTINED_TSV"
+}
+
+# Names every entry for <script> that did NOT fail in a run where the file proved
+# it dispatched every case. Returns 0 when it named at least one, so the caller
+# can turn the run red: an entry describing a failure that no longer happens is
+# the list refusing to shrink, which is the failure mode the register exists to
+# avoid. Silent when the proof is absent, because an entry whose case never ran
+# has not been shown to pass.
+report_fixed_quarantine_entries() {  # <script> <out>
+  local script=$1 out=$2 entry found=1
+  [ "$QUARANTINE_AVAILABLE" -eq 1 ] || return 1
+  grep -qxF "$FM_TEST_CASES_COMPLETE_MARKER" "$out" 2>/dev/null || return 1
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    if ! grep -F "not ok - $entry" "$out" >/dev/null 2>&1; then
+      log "QUARANTINE_STALE: $script no longer fails \"$entry\"; remove that entry from tests/quarantine.tsv and lower the ceiling"
+      found=0
+    fi
+  done < <("$QUARANTINE_BIN" --assertions "$script" 2>/dev/null || true)
+  return "$found"
+}
+
 record_script_result() {
   local script=$1 rc=$2 duration=$3 out=$4 end_iso=$5
   local base family expected gate_skip fail_delta
@@ -1515,6 +1606,34 @@ record_script_result() {
   if [ "$rc" -eq 0 ] && detect_gate_skip "$out"; then
     gate_skip=true
     SKIPPED_GATE=$((SKIPPED_GATE + 1))
+  fi
+
+  collect_case_skips "$script" "$out"
+  # A whole-file gate skip is named in the same listing as a per-case one, so a
+  # reader has one place to see everything that did not run.
+  if [ "$gate_skip" = true ]; then
+    printf '%s\t%s\n' "$script" \
+      "whole file: $(awk 'NF { sub(/^skip:[[:space:]]*/, ""); print; exit }' "$out")" >>"$SKIPS_TSV"
+  fi
+
+  # A failure whose every "not ok" is already recorded stops being a run failure
+  # and becomes a counted, named quarantine hit. The converse keeps the register
+  # honest: an entry that no longer describes reality is now just noise, and
+  # staying silent about that is how such lists become permanent.
+  if [ "$rc" -ne 0 ] && script_failures_all_quarantined "$script" "$out"; then
+    rc=0
+    QUARANTINED=$((QUARANTINED + 1))
+  elif [ "$rc" -eq 0 ] && [ "$gate_skip" = false ] && [ "$QUARANTINE_AVAILABLE" -eq 1 ] \
+    && "$QUARANTINE_BIN" --scripts 2>/dev/null | grep -qxF "$script"; then
+    log "QUARANTINE_STALE: $script passed; remove its entries from tests/quarantine.tsv and lower the ceiling"
+    rc=1
+  fi
+  # Retiring a single fixed assertion needs finer sight than "the whole file went
+  # green": a file with three entries, one of them fixed, never goes green, so the
+  # fixed one would sit there forever. When the file proves every case ran
+  # (tests/require.sh's completion marker), an entry that did not fail is fixed.
+  if report_fixed_quarantine_entries "$script" "$out"; then
+    rc=1
   fi
 
   printf 'FM_TEST_END %s %s exit=%s duration_ms=%s gate_skip=%s\n' \
@@ -1684,8 +1803,35 @@ if [ "$RUN_DURATION" -lt 0 ]; then
   RUN_DURATION=0
 fi
 
-printf 'FM_TEST_SUMMARY total=%s failed=%s skipped_gate=%s duration_ms=%s\n' \
-  "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$RUN_DURATION"
+# Validate the known-failing register on every run, not only when something
+# fails: expiry and the ratchet are what stop it becoming permanent, and a check
+# that only runs on red days never fires.
+if [ "$QUARANTINE_AVAILABLE" -eq 0 ]; then
+  log "no known-failing register alongside this runner ($QUARANTINE_BIN); every failure counts as new"
+elif ! QUARANTINE_CHECK=$("$QUARANTINE_BIN" --check 2>&1); then
+  printf '%s\n' "$QUARANTINE_CHECK" >&2
+  AGG_RC=1
+fi
+
+printf 'FM_TEST_SUMMARY total=%s failed=%s skipped_gate=%s skipped_case=%s quarantined=%s duration_ms=%s\n' \
+  "$TOTAL" "$FAILED" "$SKIPPED_GATE" "$SKIPPED_CASE" "$QUARANTINED" "$RUN_DURATION"
+
+# Name every skip and every quarantine hit. A reader must never have to wonder
+# what did not run, or mistake an absorbed known failure for a green assertion.
+if [ -s "$SKIPS_TSV" ]; then
+  log "$(wc -l <"$SKIPS_TSV" | tr -d '[:space:]') skip(s) for a missing requirement, each named:"
+  while IFS=$'\t' read -r skip_script skip_detail; do
+    printf 'FM_TEST_SKIP %s %s\n' "$skip_script" "$skip_detail"
+    log "  $skip_script - $skip_detail"
+  done <"$SKIPS_TSV"
+fi
+if [ -s "$QUARANTINED_TSV" ]; then
+  log "$QUARANTINED script(s) failed only on already-known assertions:"
+  while IFS=$'\t' read -r q_script q_assertion; do
+    printf 'FM_TEST_QUARANTINED %s %s\n' "$q_script" "$q_assertion"
+    log "  $q_script - $q_assertion"
+  done <"$QUARANTINED_TSV"
+fi
 
 if [ -s "$FAMILIES_TSV" ]; then
   # Stable family summary order by name.

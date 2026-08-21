@@ -708,7 +708,10 @@ test_treehouse_lease_check_follows_resolved_backend() {
   printf '%s\n' orca > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   rm -f "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" orca
+  # An exit-0 stub is no longer enough to count as installed: the tool check now
+  # identifies orca rather than finding the name, because GNOME's screen reader
+  # answers to it too. fm_fake_orca_cli fakes a CLI that can prove itself.
+  fm_fake_orca_cli "$fakebin"
   # FM_FAKE_TREEHOUSE_LEASE_HELP unset: the fake treehouse advertises NO --lease.
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     "$ROOT/bin/fm-bootstrap.sh")
@@ -1174,31 +1177,34 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
-test_bootstrap_reporting
-test_no_mistakes_min_version
-test_gh_axi_min_version
-test_lavish_axi_min_version
-test_tasks_axi_min_version
-test_quota_axi_min_version
-test_git_is_required_with_supported_install_instruction
-test_orca_backend_gates_orca_tool_only_when_selected
-test_session_provider_backends_do_not_require_tmux
-test_session_provider_backends_gate_own_cli_not_tmux
-test_herdr_install_requires_manual_action
-test_cmux_bundled_cli_satisfies_dependency
-test_unknown_backend_reports_invalid_configuration
-test_json_backends_require_jq_not_tmux
-test_treehouse_lease_check_follows_resolved_backend
-test_fleet_sync_timeout_scales_with_origin_backed_project_count
-test_fleet_sync_timeout_floor_preserves_small_fleets
-test_fleet_sync_timeout_explicit_override_wins
-test_fleet_sync_timeout_empty_override_uses_default
-test_fleet_sync_timeout_is_computed_before_launch
-test_routine_bootstrap_confirmations_are_silent
-test_routine_bootstrap_contract_runs_under_system_bash
-test_network_phase_partitions_the_run
-test_network_sweeps_recheck_lock_ownership
-test_network_phases_record_per_step_elapsed_times
-test_tasks_axi_verdict_handoff_is_consumed_once
-test_crew_dispatch_active_rules_are_verbose_bootstrap_info
-test_crew_dispatch_validation
+# Run through fm_test_case (tests/require.sh): this file carries a recorded
+# known failure, and without the wrapper it would end at that assertion and
+# silently drop every case after it. The file still fails if any case fails.
+fm_test_case test_bootstrap_reporting
+fm_test_case test_no_mistakes_min_version
+fm_test_case test_gh_axi_min_version
+fm_test_case test_lavish_axi_min_version
+fm_test_case test_tasks_axi_min_version
+fm_test_case test_quota_axi_min_version
+fm_test_case test_git_is_required_with_supported_install_instruction
+fm_test_case test_orca_backend_gates_orca_tool_only_when_selected
+fm_test_case test_session_provider_backends_do_not_require_tmux
+fm_test_case test_session_provider_backends_gate_own_cli_not_tmux
+fm_test_case test_herdr_install_requires_manual_action
+fm_test_case test_cmux_bundled_cli_satisfies_dependency
+fm_test_case test_unknown_backend_reports_invalid_configuration
+fm_test_case test_json_backends_require_jq_not_tmux
+fm_test_case test_treehouse_lease_check_follows_resolved_backend
+fm_test_case test_fleet_sync_timeout_scales_with_origin_backed_project_count
+fm_test_case test_fleet_sync_timeout_floor_preserves_small_fleets
+fm_test_case test_fleet_sync_timeout_explicit_override_wins
+fm_test_case test_fleet_sync_timeout_empty_override_uses_default
+fm_test_case test_fleet_sync_timeout_is_computed_before_launch
+fm_test_case test_routine_bootstrap_confirmations_are_silent
+fm_test_case test_routine_bootstrap_contract_runs_under_system_bash
+fm_test_case test_network_phase_partitions_the_run
+fm_test_case test_network_sweeps_recheck_lock_ownership
+fm_test_case test_network_phases_record_per_step_elapsed_times
+fm_test_case test_tasks_axi_verdict_handoff_is_consumed_once
+fm_test_case test_crew_dispatch_active_rules_are_verbose_bootstrap_info
+fm_test_case test_crew_dispatch_validation

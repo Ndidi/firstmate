@@ -108,6 +108,9 @@ A fixed settle is wrong in both directions - too short and the assertion becomes
 Set `FM_TEST_WAIT_TRACE=1` on a run to see what each wait waited for and how long it actually took.
 
 Tests that need a real optional backend or an explicit opt-in (real herdr/zellij/cmux smoke tests, the live Pi regression) skip themselves and print the tool or environment gate needed to enable them, so the portable suite remains safe on machines without those tools.
+A single case inside an otherwise-useful file does the same through `fm_require_tool` / `fm_require`, owned by [`tests/require.sh`](tests/require.sh), which also owns why a skip is always counted and named rather than silent.
+Whether a required tool counts as installed is decided by [`bin/fm-tool-identity-lib.sh`](bin/fm-tool-identity-lib.sh) rather than by `command -v`, because a name on PATH is not the tool: GNOME ships its screen reader as `orca`.
+Failures that are real, reproduced, and not yours to fix are recorded in [`tests/quarantine.tsv`](tests/quarantine.tsv); [`bin/fm-test-quarantine.sh`](bin/fm-test-quarantine.sh) owns its format and the expiry, ratchet, and staleness rules that keep the list shrinking, and a failure that is not recorded still fails the run.
 The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the lane's isolation boundary, while [runtime backend verification](docs/verification/runtime-backends.md#herdr) owns active empirical evidence; live harness credential tests remain opt-in.
 
 ## Questions

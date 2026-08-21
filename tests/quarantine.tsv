@@ -1,0 +1,20 @@
+# Known-failing assertions. Format, ratchet, expiry, and the reasoning behind
+# all three are owned by bin/fm-test-quarantine.sh - read its header before
+# adding, re-dating, or removing an entry.
+#
+# script<TAB>assertion<TAB>recorded<TAB>review-by<TAB>reason
+#
+# The two fm-secondmate-sync entries share ONE established cause: each assertion
+# predates bin/fm-unowned-window-lib.sh and now observes that feature rather than
+# the behaviour it was written for. Neither shows a firstmate defect - the retry
+# and marker-rejection behaviour under test is correct in both. They are recorded
+# rather than fixed because correcting a test assertion changes what the suite
+# claims, which belongs with whoever owns that behaviour, not with the task that
+# made the verdict readable.
+#
+# Every entry here is a failure REPRODUCED in isolation with its cause
+# established. An intermittent failure is not eligible and is deliberately left
+# red; see bin/fm-test-quarantine.sh for why there is no mode to file one under.
+tests/fm-secondmate-sync.test.sh	malformed retry marker should not invoke fm-send	2026-08-20	2026-11-18	Asserts the fake tmux log does not exist, but bootstrap unconditionally runs tmux list-windows for the unclaimed-window scan, which creates it. The log was captured on 2026-08-20 and holds only that list-windows call, so no send occurred and the marker rejection is correct; d3797c6 recorded this as a live fm-send defect, which the capture disproves.
+tests/fm-secondmate-sync.test.sh	idempotent retry should converge to silence	2026-08-20	2026-11-18	Requires bootstrap output to be entirely empty on a second run, which the unclaimed-window BOOTSTRAP_INFO fact makes impossible for any fixture with live windows. Was invisible until this file stopped ending at its first failure.
+tests/fm-secondmate-harness.test.sh	first config push did not reach pointer delivery	2026-08-21	2026-11-18	Reproduced 4/4 alone and on clean main at 7aae438, so it is pre-existing and not a behaviour defect: test_config_reread_serializes_concurrent_pushes waits a fixed 2s (100 x 0.02s) for the background push to reach pointer delivery, and the real path needs longer on this machine. Raising only that deadline to 30s makes the whole file pass, which is the fm-test-suite-waits task's fixed-sleep work, out of scope here.

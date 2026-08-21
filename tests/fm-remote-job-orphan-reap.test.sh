@@ -123,6 +123,17 @@ SERVE=$(pgrep -P "$WORKER" | head -n 1)
   fail "the serving child is outside the worker's process group"
 pass "the Linux start path puts the whole worker tree in its own process group"
 
+# The leak this whole file pins is a worker REPARENTED TO INIT. A session with a
+# child subreaper - `systemd --user` on essentially every modern desktop Linux -
+# adopts orphans itself, so the precondition is unobservable there and the case
+# cannot reproduce what it exists to catch. Detected by asking the kernel, so the
+# same file still runs for real wherever the init handoff does happen.
+if ! fm_require 'orphan reap after a pruned code root' \
+  'orphaned processes are adopted by a child subreaper on this machine (systemd --user), not reparented to init (pid 1)' \
+  fm_test_orphans_reparent_to_init; then
+  exit 0
+fi
+
 [ "$(ppid_of "$WORKER")" = 1 ] ||
   fail "the fixture worker is not orphaned to init, so this case does not reproduce the leak"
 

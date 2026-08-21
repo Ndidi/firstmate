@@ -12,13 +12,27 @@
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh"
 
+# Identity probing is owned by bin/fm-tool-identity-lib.sh and consulted from the
+# runtime gate below, never from the per-operation tool check: a probe execs the
+# tool, so running it on every capture would change how often Orca is invoked.
+# shellcheck source=bin/fm-tool-identity-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/../fm-tool-identity-lib.sh"
+
 fm_backend_orca_tool_check() {
   command -v orca >/dev/null 2>&1 || { echo "error: backend=orca selected but the 'orca' CLI is not installed" >&2; return 1; }
 }
 
 fm_backend_orca_runtime_check() {
   fm_backend_orca_tool_check || return 1
-  local out
+  local out reason
+  # GNOME ships its screen reader as /usr/bin/orca, so presence alone passed this
+  # gate on any GNOME desktop and the real failure surfaced later, unexplained.
+  # Identity is settled once here, before a spawn mutates repository state, and
+  # the reason names what was found instead of a bare "not installed".
+  if reason=$(fm_tool_identity_reason orca); then
+    echo "error: backend=orca selected but $reason" >&2
+    return 1
+  fi
   out=$(orca status --json 2>/dev/null) || {
     echo "error: backend=orca selected but 'orca status --json' failed; start Orca and wait for the runtime to be ready" >&2
     return 1

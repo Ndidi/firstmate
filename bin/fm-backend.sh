@@ -328,7 +328,17 @@ fm_backend_required_tool_available() {  # <backend> <tool>
       fm_backend_source cmux >/dev/null 2>&1 || return 1
       fm_backend_cmux_bin >/dev/null 2>&1
       ;;
-    *) command -v "$tool" >/dev/null 2>&1 ;;
+    # Identity, not just a name on PATH: GNOME ships its screen reader as
+    # /usr/bin/orca, so `command -v orca` reports the Orca backend installed on
+    # any GNOME desktop. bin/fm-tool-identity-lib.sh owns the probe and keeps
+    # plain presence semantics for every tool with no registered probe.
+    *)
+      if ! declare -F fm_tool_present >/dev/null 2>&1; then
+        # shellcheck source=bin/fm-tool-identity-lib.sh
+        . "$(dirname -- "${BASH_SOURCE[0]}")/fm-tool-identity-lib.sh"
+      fi
+      fm_tool_present "$tool"
+      ;;
   esac
 }
 

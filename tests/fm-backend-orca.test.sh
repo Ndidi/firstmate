@@ -17,6 +17,19 @@ set -u
 LOG="${FM_ORCA_LOG:?}"
 RESP="${FM_ORCA_RESPONSES:?}"
 COUNT_FILE="$RESP/.count"
+# Answer the identity probe the way the real CLI does: usage naming the worktree
+# and terminal commands, printed and exited without touching the response queue.
+# Deliberately not logged - the log records the ADAPTER's operations, and a
+# presence probe is not one. FM_ORCA_UNIDENTIFIED makes this fake impersonate a
+# same-named stranger instead.
+if [ "${1:-}" = --help ]; then
+  if [ -n "${FM_ORCA_UNIDENTIFIED:-}" ]; then
+    printf '%s\n' "$FM_ORCA_UNIDENTIFIED"
+  else
+    printf 'Usage: orca <command>\n\nCommands:\n  status    report runtime readiness\n  repo      register a repository\n  worktree  create and manage worktrees\n  terminal  create, read, and write terminals\n'
+  fi
+  exit 0
+fi
 next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
 {
   printf 'orca'

@@ -1369,7 +1369,12 @@ if (!existsSync(process.env.FM_ARM_LOG)) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must arm only when this session owns the fleet lock"
+  # The node harness prints which of its four branches it took before exiting 1,
+  # and expect_code fires before the output check below, so a bare failure used to
+  # discard exactly the line that names the cause. Carry it into the message: an
+  # unattributable "expected exit 0, got 1" is what cost a worker an hour on
+  # 2026-08-20.
+  expect_code 0 "$status" "OpenCode watch plugin must arm only when this session owns the fleet lock${out:+ - $out}"
   [ -z "$out" ] || fail "OpenCode session-lock test printed output: $out"
   pass "OpenCode watcher plugin requires session lock ownership"
 }

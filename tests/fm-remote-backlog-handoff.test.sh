@@ -5,8 +5,34 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+# This fixture symlinks the real tasks-axi into a fake remote root's bin (below),
+# because every receipt case drives it from the REMOTE side of a sanitized,
+# env -i child. So the requirement is not "tasks-axi exists" - it is "tasks-axi
+# still works when reached through a symlink somewhere else". A pnpm-style shim
+# resolves its own module tree relative to its own path and dies when relocated,
+# and the whole file then fails as though firstmate were broken.
+#
+# Probed, never assumed from the install layout: build the same symlink the
+# fixture builds and ask whether it runs.
+fm_remote_handoff_tasks_axi_is_relocatable() {
+  local real probe rc
+  real=$(command -v tasks-axi 2>/dev/null) || return 1
+  probe=$(mktemp -d "${TMPDIR:-/tmp}/.fm-tasks-axi-relocate.XXXXXX") || return 1
+  ln -s "$real" "$probe/tasks-axi" || { rm -rf "$probe"; return 1; }
+  "$probe/tasks-axi" --version >/dev/null 2>&1
+  rc=$?
+  rm -rf "$probe"
+  return "$rc"
+}
+if ! fm_remote_handoff_tasks_axi_is_relocatable; then
+  if command -v tasks-axi >/dev/null 2>&1; then
+    echo "skip: this machine's tasks-axi ($(command -v tasks-axi)) cannot run through a symlink, and every receipt case reaches it as one from the fixture's remote root - it resolves its own module tree relative to its own path, so a relocated copy fails to load"
+  else
+    echo "skip: tasks-axi is not installed"
+  fi
+  exit 0
+fi
 TMP_ROOT=$(fm_test_tmproot fm-remote-handoff)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
