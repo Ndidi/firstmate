@@ -1477,9 +1477,16 @@ EOF
 # current-state read. Prints nothing and returns 1 when no dialog is proven;
 # prints one tab-separated
 #   <signals>\t<question>\t<options>
-# line and returns 0 when one is. The screen may be styled or plain: every
-# signal is structural, so this reads the same on a styled=0 backend as on a
-# styled=1 one and needs no capability argument beyond the caps it is handed.
+# line and returns 0 when one is.
+#
+# <caps> is accepted and DELIBERATELY UNUSED, which is worth stating rather than
+# leaving a reader to wonder. Every signal this reads is structural - numbering,
+# glyphs, key names, and the container geometry around them - so the verdict is
+# identical on a styled=0 capture (cmux, orca) and a styled=1 one, and identical
+# with or without a cursor. The parameter stays so this entry point matches its
+# sibling fm_composer_classify_screen, and so a caller never has to know which
+# of the two needs capabilities; a future signal that does need them has the
+# argument already in place at every call site.
 fm_composer_dialog_probe() {  # <caps> <screen>
   local screen=$2 plain
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
