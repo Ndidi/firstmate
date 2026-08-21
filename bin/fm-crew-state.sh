@@ -46,7 +46,13 @@
 #      the run-step shows the run moved on, the log is deterministically stale and
 #      is flagged superseded. A genuinely parked run plus a needs-decision log
 #      agree, and are reported as parked.
-#   4. No run for this crew (pre-validation, or kind=scout): fall back to the
+#   4. No run for this crew (pre-validation, or kind=scout): read the pane for a
+#      harness confirmation FIRST (bin/fm-composer-lib.sh's `dialog` shape) - a
+#      modal keeps the harness mid-turn, so the busy verdict below is true and
+#      useless, and reporting `working` from it is exactly what hid a parked
+#      worker for an hour. A proven confirmation reports `parked` naming the
+#      question, which is also what keeps fm-classify-lib.sh's crew_absorb_class
+#      from absorbing it as provably working. Otherwise fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.

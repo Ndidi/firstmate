@@ -142,6 +142,13 @@ make_supercase() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  list-panes)
+    # The endpoint-liveness primitive (fm_backend_target_exists). Honors the
+    # same FM_FAKE_TMUX_PANE_ALIVE switch as display-message below: a fake that
+    # answered yes for every target could only ever confirm the alive case.
+    [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
+    printf '0: [80x24] [history 0/2000, 0 bytes] %%1 (active)\n'
+    exit 0 ;;
   display-message)
     [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
     _print=0
@@ -234,6 +241,13 @@ write_composer() {
   printf '╭%s╮\n│ > %s │\n╰%s╯\n' "$border" "$text" "$border" > "$COMPOSER"
 }
 case "${1:-}" in
+  list-panes)
+    # The endpoint-liveness primitive (fm_backend_target_exists). Every case in
+    # this fixture drives an injection into a pane that is meant to EXIST, so
+    # this answers yes; omitting it made every injection defer on a dead
+    # endpoint instead of exercising the composer guard under test.
+    printf '0: [80x24] [history 0/2000, 0 bytes] %%1 (active)\n'
+    exit 0 ;;
   display-message)
     print=0
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done

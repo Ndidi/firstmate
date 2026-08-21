@@ -120,11 +120,29 @@ harness_confirm_prompt() {  # <name> <workdir>
   esac
 }
 
-# Answer whatever is on screen with the one key that commits nothing. Escape is
-# how the composer-matrix guard declines vendor modals too; Enter is never sent,
-# because on a confirmation Enter SELECTS the highlighted option.
+# Decline whatever is on screen with the one key that commits nothing. Enter is
+# NEVER sent here, because on a confirmation Enter SELECTS the highlighted
+# option - which on the dangerous-rm guard this test deliberately provokes means
+# performing the deletion.
 decline() {  # <window>
   tmux -L "$SOCKET" send-keys -t "$SESSION:$1" Escape 2>/dev/null || true
+}
+
+# A STARTUP modal is different, and the difference is load-bearing: on a trust
+# prompt Escape EXITS the harness (verified live, claude 2.1.238 - an earlier
+# revision of this guard lost every mid-run result that way), so a trust prompt
+# must be accepted rather than declined. Accepting is safe only because the
+# working directory is this run's own mktemp tree, created above and deleted on
+# exit; it is never the operator's checkout. Any other startup modal - a vendor
+# update offer - is still declined with Escape, which commits nothing.
+clear_startup_modal() {  # <window>
+  local screen
+  screen=$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$1" 2>/dev/null || true)
+  if printf '%s\n' "$screen" | grep -qi 'trust'; then
+    tmux -L "$SOCKET" send-keys -t "$SESSION:$1" Enter 2>/dev/null || true
+  else
+    tmux -L "$SOCKET" send-keys -t "$SESSION:$1" Escape 2>/dev/null || true
+  fi
 }
 
 # Wait for the harness's idle composer, proving the launch worked before any
@@ -179,7 +197,7 @@ check_harness() {  # <name>
     if [ "$(fm_tmux_composer_state "$SESSION:$win")" = dialog ]; then
       CHECKED=$((CHECKED + 1))
       pass "$name ($version): a startup confirmation classifies dialog"
-      decline "$win"
+      clear_startup_modal "$win"
       if ! wait_for_idle_composer "$win" "$idle_budget"; then
         note "$name ($version): could not reach an idle composer after declining its startup modal; mid-run axis not verified"
         UNREACHED="$UNREACHED $name(mid-run)"

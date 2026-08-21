@@ -205,6 +205,51 @@ Cursor is deliberately outside this cursor-anchored empty-composer matrix becaus
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
+## Parked-confirmation detection
+
+A harness that replaces its composer with a modal confirmation keeps the pane mid-turn, so every busy source reports busy and the pane never becomes stale.
+`bin/fm-composer-lib.sh`'s `dialog` verdict is what tells that apart from a long tool call, and it is decided from vendor-rendered output, so it is refreshed against real harnesses rather than trusted across releases.
+
+Verified on 2026-08-21 on tmux 3.6a, Linux x86_64, on an isolated private socket, with each harness launched under the autonomy flag `bin/fm-spawn.sh` uses and each confirmation declined without ever sending Enter.
+
+```sh
+FM_DIALOG_LIVE=1 bin/fm-test-run.sh tests/fm-dialog-parked-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - claude (2.1.238 (Claude Code)): a startup confirmation classifies dialog
+ok - claude (2.1.238 (Claude Code)): an ordinary idle composer is not mistaken for a confirmation
+ok - claude (2.1.238 (Claude Code)): a real mid-run confirmation classifies dialog
+# harness absent, not verified here: codex
+# harness absent, not verified here: opencode
+# harness absent, not verified here: pi
+# harness absent, not verified here: grok
+# harness absent, not verified here: kimi
+# harness absent, not verified here: muse
+# harness absent, not verified here: cursor-agent
+# axes NOT verified by this run: codex(absent) opencode(absent) pi(absent) grok(absent) kimi(absent) muse(absent) cursor-agent(absent)
+ok - live parked-confirmation guard verified 3 live axis/axes
+```
+
+Claude is the only harness proven live so far, on all three axes, and it is the harness the defect was observed on.
+Its mid-run case is the hardcoded dangerous-`rm` guard, which fires even under `--dangerously-skip-permissions`; the guard drives it against a throwaway temp directory it created itself and answers No.
+The idle-composer axis exists so this record cannot be satisfied by a classifier that calls everything a confirmation.
+
+Codex, OpenCode, Pi, Grok, Kimi, Muse, and Cursor Agent were NOT installed on the verification machine and are therefore unproven here, in both directions: neither that they draw a confirmation this reader proves, nor that their ordinary composers are safe from it.
+The guard reports each absent harness by name and refuses a pass that checked nothing, so an unproven harness is visible rather than silently assumed.
+The portable regression `tests/fm-dialog-parked.test.sh` pins the classifier's logic (including its containment refusals) wherever CI runs tmux, but it cannot substitute for these live results: it renders shapes this repo transcribed, so it can only confirm what was already believed about how a harness draws.
+
+Two related shapes are deliberately NOT covered by this verdict, and each is recorded here so a future reader does not mistake silence for coverage:
+
+- A healthy worker whose CHILD PROCESS is waiting on a human (a foreground `lavish-axi poll`) leaves an ordinary empty composer on screen, with nothing confirmation-shaped drawn anywhere.
+  It is idle at the pane level, so it reaches the stale path instead, and this reader correctly returns no confirmation for it (observed live 2026-08-21 on a real such pane: composer `empty`, confirmation probe negative).
+  Detecting it would need process-tree evidence, not screen shape.
+- A worker whose model API call died mid-turn also reads busy forever, because no turn ends and the hook-based busy source never closes.
+  Its pane carries a normal working footer with no choices, so this reader returns no confirmation for it either; the distinguishing evidence is temporal (a token counter that does not move across readings minutes apart while the elapsed timer keeps climbing), which a single-screen shape read cannot see.
+  `FM_BUSY_TURN_MAX_SECS` in `bin/fm-watch.sh` remains the backstop for it, and its generic "possible wedge" wording is accurate for that case.
+
 ## Herdr
 
 The compatibility floor is protocol 14.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/fm-composer-lib.sh - the ONE fleet-wide owner of composer classification:
 # every shape a verified harness draws, every glyph, every container proof, and
-# the empty|pending|pending-unproven|unknown verdict, shared by every
+# the empty|pending|pending-unproven|dialog|unknown verdict, shared by every
 # session-provider adapter (tmux via bin/fm-tmux-lib.sh, and
 # bin/backends/{herdr,orca,cmux,zellij}.sh) and by fm-spawn.sh's kimi
 # launch-readiness check.
@@ -76,6 +76,49 @@
 # and `→` (U+2192, cursor) are a genuine empty agent composer either way.
 # Both glyph sets are declared
 # exactly once below; every decision reaches them through the declarations.
+#
+# THE DIALOG SHAPE (task fm-dialog-parked-worker-surfaces, observed live
+# 2026-08-21 on claude 2.1.238): a harness may REPLACE its composer with a modal
+# confirmation it will not leave until a human answers - claude's hardcoded
+# dangerous-`rm` guard (which fires even under --dangerously-skip-permissions), a
+# trust prompt, a vendor update offer. That pane is healthy and mid-turn, so
+# every busy source correctly reports busy and nothing else in the fleet can tell
+# it apart from a long tool call; the observed worker read `working` for an hour
+# before the watcher's BUSY_TURN_MAX_SECS backstop surfaced it, wearing the
+# generic "possible wedge" wording for a worker that had stopped nothing.
+#
+# It is also the one shape that can be MISTAKEN FOR TYPED INPUT: claude marks its
+# selected option with the very `❯` it draws its composer with, so `❯ 1. Yes`
+# read `pending` - the one verdict both submit loops retry Enter on
+# (fm_composer_submit_retry_core below, fm_tmux_submit_enter_core in
+# bin/fm-tmux-lib.sh). Enter on that dialog selects `1. Yes`. So `dialog` is a
+# safety verdict as much as a supervision one, and it outranks every composer
+# shape: a caller may type into `empty` and nothing else.
+#
+# FOUR INDEPENDENT SIGNALS, ANY TWO (the harness-dependent-check rule in
+# .agents/skills/firstmate-coding-guidelines): the verdict comes from
+# vendor-rendered output, so no single vendor string may carry it. `options` is
+# a numbered choice list, `selection` is exactly one highlighted row among
+# unhighlighted siblings, `keyhint` is a row naming BOTH a key and the action it
+# takes, `question` is a row above the choices ending in `?`. Any one may be
+# lost to a rewording without losing the verdict, and one accidental match is
+# never enough. The numbered list is additionally the structural ANCHOR the
+# containment rule is measured against; an unnumbered choice run is declined
+# rather than guessed, because it is indistinguishable from a bare-glyph
+# composer holding a multi-line message.
+#
+# THE CONTAINMENT PRECONDITION is what actually keeps false positives out, and
+# false positives are the expensive direction: wrongly reporting a working
+# worker as "waiting for you" trains a supervisor to ignore the signal, while a
+# missed one still has BUSY_TURN_MAX_SECS behind it. A numbered list is common -
+# in transcript output, in a brief quoted on screen, in a multi-line message
+# typed into a composer - and in every one of those cases a live composer
+# encloses the list or is drawn below it. So a candidate is refused whenever any
+# composer container (box, left-bar run, valid pi separator pair) encloses it, or
+# any composer container, bare agent-glyph row, dead-shell prompt row, or lone
+# separator rule sits BELOW it. The rules come from the catalogue above rather
+# than from any property of the rows themselves, so the shape knowledge and its
+# false-positive defence cannot drift apart.
 #
 # GHOST/PLACEHOLDER TEXT (task afk-herdr-false-pending): a harness fills an
 # otherwise-empty composer with de-emphasized ghost text - claude's rotating
@@ -581,8 +624,8 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 #   [identity]   "<agent>\t<status>" from the backend's native identity probe,
 #                or `probe-absent` when the probe found no live identity; only
 #                meaningful when caps carry identity=1.
-# Prints exactly one verdict: empty | pending | pending-unproven | unknown,
-# or the internal sentinel `need-identity` when caps declare identity=1, no
+# Prints exactly one verdict: empty | pending | pending-unproven | dialog |
+# unknown, or the internal sentinel `need-identity` when caps declare identity=1, no
 # identity result was supplied, and the verdict depends on it. Adapters answer
 # `need-identity` by running their identity probe once and re-calling with
 # either its result or `probe-absent`; the sentinel never escapes an adapter.
@@ -1277,7 +1320,10 @@ _fm_composer_dialog_keyhint_row() {  # <trimmed-row>
 
 # Results are returned through FM_COMPOSER_DIALOG_* globals (bash 3.2 has no
 # nameref), matching _fm_composer_scan_screen's convention. Internal to this
-# owner; consumers read them through fm_composer_dialog_probe below.
+# owner; consumers read them through fm_composer_dialog_probe below. Only the
+# three a consumer needs are published - which signals proved the shape, and the
+# prose that tells a supervisor what is being asked - so nothing here is
+# write-only bookkeeping a reader has to wonder about.
 #
 # The caller must already have run _fm_composer_scan_screen over the same plain
 # screen, because the CONTAINMENT PRECONDITION is expressed entirely in that
@@ -1289,14 +1335,11 @@ _fm_composer_dialog_scan() {  # <plain-screen>
   local labels='' signals='' score=0 question='' options=''
   local rows=()
   FM_COMPOSER_DIALOG_SIGNALS=''
-  FM_COMPOSER_DIALOG_SCORE=0
-  FM_COMPOSER_DIALOG_FIRST=-1
-  FM_COMPOSER_DIALOG_LAST=-1
   FM_COMPOSER_DIALOG_QUESTION=''
   FM_COMPOSER_DIALOG_OPTIONS=''
   while IFS= read -r line; do
     fm_composer_normalize_trim_var line
-    rows[$row]=$line
+    rows[row]=$line
     row=$((row + 1))
   done <<EOF
 $plain
@@ -1423,9 +1466,6 @@ EOF
   _fm_composer_dialog_text_var question
   _fm_composer_dialog_text_var options
   FM_COMPOSER_DIALOG_SIGNALS=$signals
-  FM_COMPOSER_DIALOG_SCORE=$score
-  FM_COMPOSER_DIALOG_FIRST=$best_first
-  FM_COMPOSER_DIALOG_LAST=$best_last
   FM_COMPOSER_DIALOG_QUESTION=$question
   FM_COMPOSER_DIALOG_OPTIONS=$options
   [ "$score" -ge "$FM_COMPOSER_DIALOG_MIN_SIGNALS" ]

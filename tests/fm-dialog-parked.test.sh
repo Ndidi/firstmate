@@ -465,7 +465,8 @@ queued_dialogs() {  # <dir>
 }
 
 drain_and_ack() {  # <dir>
-  local dir=$1 err="$dir/drain.err"
+  local dir=$1
+  local err="$dir/drain.err"
   FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-wake-drain.sh" >/dev/null 2> "$err" || true
   ack_drain_err "$dir/state" "$err" || true
   rm -f "$err"

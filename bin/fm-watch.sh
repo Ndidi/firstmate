@@ -40,6 +40,18 @@
 #                          count, and demand-deep-inspection marker, for human
 #                          inspection only - never an automatic interrupt,
 #                          signal, or restart of the worker or its tool process.
+#   dialog: <window>       the harness has parked on a confirmation only a human
+#                          can answer (bin/fm-composer-lib.sh's `dialog` shape).
+#                          Always actionable and never absorbed into the stale
+#                          path: such a pane stays mid-turn, so it is BUSY and
+#                          never becomes stale at all, and the worker is not
+#                          wedged but waiting. The reason names the task and
+#                          enough of the question to decide. Surfaced on first
+#                          sighting of a given screen, absorbed while unchanged,
+#                          and re-surfaced once per DIALOG_RESURFACE_SECS so an
+#                          unanswered one cannot rot silently. Never answered
+#                          automatically: only firstmate decides what a
+#                          confirmation deserves.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -358,7 +370,7 @@ busy_turn_over_age() {  # <task>
 # returns 1 the moment the confirmation is gone, and the aging it depends on
 # (state/<id>.turn-ended, else the spawn record) is never written here.
 dialog_check() {  # <window> <task> <tail40> <hash>
-  local win=$1 task=$2 tail40=$3 h=$4 key probe question options reason age since
+  local win=$1 task=$2 tail40=$3 h=$4 key probe question options reason age since who
   key=$(printf '%s' "$win" | tr ':/.' '___')
   if ! probe=$(fm_composer_dialog_probe '' "$tail40"); then
     rm -f "$STATE/.dialog-$key" "$STATE/.dialog-since-$key"
@@ -366,7 +378,9 @@ dialog_check() {  # <window> <task> <tail40> <hash>
   fi
   question=$(printf '%s' "$probe" | cut -f2)
   options=$(printf '%s' "$probe" | cut -f3)
-  reason="dialog: $win (fm-$task is waiting for a human answer"
+  who="fm-$task"
+  [ -n "$task" ] || who="the worker at $win"
+  reason="dialog: $win ($who is waiting for a human answer"
   [ -n "$question" ] && reason="$reason: $question"
   [ -n "$options" ] && reason="$reason - options: $options"
   reason="$reason)"
@@ -378,7 +392,7 @@ dialog_check() {  # <window> <task> <tail40> <hash>
       triage_log "absorbed dialog (already surfaced ${age}s ago): $win"
       return 0
     fi
-    reason="dialog: $win (fm-$task is STILL waiting for a human answer after ${age}s"
+    reason="dialog: $win ($who is STILL waiting for a human answer after ${age}s"
     [ -n "$question" ] && reason="$reason: $question"
     [ -n "$options" ] && reason="$reason - options: $options"
     reason="$reason)"
