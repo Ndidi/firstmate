@@ -388,6 +388,43 @@ FM_COMPOSER_CAPTURE_LINES=${FM_COMPOSER_CAPTURE_LINES:-20}
 # large region between them can never be promoted into a composer.
 FM_COMPOSER_PI_MAX_LINES=${FM_COMPOSER_PI_MAX_LINES:-8}
 
+# --- The dialog shape's declarations ----------------------------------------
+# See "THE DIALOG SHAPE" in the header for what this proves and why.
+
+# Selection glyphs a harness may use to mark the highlighted row of a choice
+# list, declared exactly once. The agent prompt glyphs are included because
+# claude marks its selected option with the very `❯` it draws its composer
+# with (verified live, claude 2.1.238) - which is exactly why the containment
+# precondition, not the glyph, is what separates a dialog from a composer.
+FM_COMPOSER_DIALOG_SELECT_GLYPHS=$(printf '%s\n' '❯' '›' '⟩' '→' '▶' '▸' '►' '‣' '●' '◉' '>' '*')
+
+# A key-hint row must name BOTH a key and the action that key takes, so
+# ordinary prose that merely mentions a key never scores. Matched
+# case-insensitively over one row. Verified live: claude's confirmation footer
+# `Esc to cancel · Tab to amend · ctrl+e to explain` and its trust footer
+# `Enter to confirm · Esc to cancel` (claude 2.1.238).
+FM_COMPOSER_DIALOG_KEY_RE_DEFAULT='esc|enter|return|tab|space|arrow|ctrl\+|⏎|↵|\[?[yn]/[yn]\]?'
+FM_COMPOSER_DIALOG_ACTION_RE_DEFAULT='cancel|confirm|proceed|continue|accept|approve|allow|deny|reject|decline|dismiss|select|choose|skip|amend|explain|exit|quit|abort|back'
+
+# How many rows above a candidate block a question row may sit. Small: the
+# question a modal asks sits directly above its choices, and a wider window
+# would start reaching into unrelated transcript output.
+FM_COMPOSER_DIALOG_QUESTION_LOOKBACK=${FM_COMPOSER_DIALOG_QUESTION_LOOKBACK:-4}
+
+# The row window a DIALOG read should capture. Deliberately wider than
+# FM_COMPOSER_CAPTURE_LINES: a composer read only needs the bottom-anchored
+# composer itself, while a dialog read also wants the question above its
+# choices, and a window that clips a composer's opening rule while keeping its
+# closing one is exactly the keyhole the containment rule has to reject.
+FM_COMPOSER_DIALOG_CAPTURE_LINES=${FM_COMPOSER_DIALOG_CAPTURE_LINES:-40}
+case "$FM_COMPOSER_DIALOG_CAPTURE_LINES" in ''|*[!0-9]*|0) FM_COMPOSER_DIALOG_CAPTURE_LINES=40 ;; esac
+
+# Independent signals a candidate block needs before it is proven a dialog.
+# Two of four: any one may be lost to a vendor rewording without losing the
+# verdict, and one accidental match is never enough on its own.
+FM_COMPOSER_DIALOG_MIN_SIGNALS=${FM_COMPOSER_DIALOG_MIN_SIGNALS:-2}
+case "$FM_COMPOSER_DIALOG_MIN_SIGNALS" in ''|*[!0-9]*|0) FM_COMPOSER_DIALOG_MIN_SIGNALS=2 ;; esac
+
 # 0 when <content> is exactly one glyph drawn from <glyph-list>.
 _fm_composer_is_prompt_glyph() {  # <content> <glyph-list>
   local content=$1 glyph
@@ -400,58 +437,43 @@ EOF
   return 1
 }
 
-# fm_composer_leading_prompt_glyph_var: set <out-varname> to the ONE prompt
-# glyph <content> begins with once its leading whitespace is ignored, or to the
-# empty string (returning 1) when it begins with none. Both glyph lists are
-# reached here, so no caller can respell them and drift. Returning the matched
-# glyph as a LITERAL string lets every caller remove it byte-exactly with
-# `${v#"$glyph"}`, which is correct in every locale.
-fm_composer_leading_prompt_glyph_var() {  # <out-varname> <content>
-  local __fmpg_out=$1 __fmpg_text=$2 __fmpg_glyph
-  __fmpg_text="${__fmpg_text#"${__fmpg_text%%[![:space:]]*}"}"
-  while IFS= read -r __fmpg_glyph; do
-    [ -n "$__fmpg_glyph" ] || continue
-    case "$__fmpg_text" in
-      "$__fmpg_glyph"*) printf -v "$__fmpg_out" '%s' "$__fmpg_glyph"; return 0 ;;
+# _fm_composer_leading_glyph_var: the ONE leading-glyph matcher. Sets
+# <out-varname> to the first glyph of <glyph-list> that <content> begins with
+# once its leading whitespace is ignored, or to the empty string (returning 1)
+# when it begins with none. Returning the matched glyph as a LITERAL string
+# lets every caller remove it byte-exactly with `${v#"$glyph"}`, which is
+# correct in every locale. Every named wrapper below differs only in which
+# declared list it passes, so no caller can respell a glyph and drift.
+_fm_composer_leading_glyph_var() {  # <out-varname> <content> <glyph-list>
+  local __fmlg_out=$1 __fmlg_text=$2 __fmlg_glyph
+  __fmlg_text="${__fmlg_text#"${__fmlg_text%%[![:space:]]*}"}"
+  while IFS= read -r __fmlg_glyph; do
+    [ -n "$__fmlg_glyph" ] || continue
+    case "$__fmlg_text" in
+      "$__fmlg_glyph"*) printf -v "$__fmlg_out" '%s' "$__fmlg_glyph"; return 0 ;;
     esac
   done <<EOF
-$FM_COMPOSER_AGENT_PROMPT_GLYPHS
-$FM_COMPOSER_SHELL_PROMPT_GLYPHS
+$3
 EOF
-  printf -v "$__fmpg_out" '%s' ''
+  printf -v "$__fmlg_out" '%s' ''
   return 1
 }
 
-# fm_composer_leading_agent_glyph_var: like the above but AGENT glyphs only.
-# The bare-row shape must never be anchored by a shell glyph (dead-shell rule).
+# Any prompt glyph, agent or shell.
+fm_composer_leading_prompt_glyph_var() {  # <out-varname> <content>
+  _fm_composer_leading_glyph_var "$1" "$2" \
+    "$FM_COMPOSER_AGENT_PROMPT_GLYPHS
+$FM_COMPOSER_SHELL_PROMPT_GLYPHS"
+}
+
+# AGENT glyphs only: the bare-row shape must never be anchored by a shell
+# glyph (dead-shell rule).
 fm_composer_leading_agent_glyph_var() {  # <out-varname> <content>
-  local __fmag_out=$1 __fmag_text=$2 __fmag_glyph
-  __fmag_text="${__fmag_text#"${__fmag_text%%[![:space:]]*}"}"
-  while IFS= read -r __fmag_glyph; do
-    [ -n "$__fmag_glyph" ] || continue
-    case "$__fmag_text" in
-      "$__fmag_glyph"*) printf -v "$__fmag_out" '%s' "$__fmag_glyph"; return 0 ;;
-    esac
-  done <<EOF
-$FM_COMPOSER_AGENT_PROMPT_GLYPHS
-EOF
-  printf -v "$__fmag_out" '%s' ''
-  return 1
+  _fm_composer_leading_glyph_var "$1" "$2" "$FM_COMPOSER_AGENT_PROMPT_GLYPHS"
 }
 
 fm_composer_leading_shell_glyph_var() {  # <out-varname> <content>
-  local __fmsg_out=$1 __fmsg_text=$2 __fmsg_glyph
-  __fmsg_text="${__fmsg_text#"${__fmsg_text%%[![:space:]]*}"}"
-  while IFS= read -r __fmsg_glyph; do
-    [ -n "$__fmsg_glyph" ] || continue
-    case "$__fmsg_text" in
-      "$__fmsg_glyph"*) printf -v "$__fmsg_out" '%s' "$__fmsg_glyph"; return 0 ;;
-    esac
-  done <<EOF
-$FM_COMPOSER_SHELL_PROMPT_GLYPHS
-EOF
-  printf -v "$__fmsg_out" '%s' ''
-  return 1
+  _fm_composer_leading_glyph_var "$1" "$2" "$FM_COMPOSER_SHELL_PROMPT_GLYPHS"
 }
 
 fm_composer_idle_matches() {
@@ -1183,6 +1205,250 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
+# --- The dialog shape --------------------------------------------------------
+
+# _fm_composer_dialog_option_var: 0 when <trimmed-row> is a numbered choice
+# row. Sets <num-var> to its number, <label-var> to the label after the
+# separator, and <glyph-var> to the selection glyph it carries (empty when it
+# carries none). Structural only: `1.` / `2)` numbering is a convention no
+# release note rewrites, unlike the prose beside it.
+# _fm_composer_dialog_text_var: make one captured row safe to carry in a wake
+# payload, in place through the named variable. The structural scan deliberately
+# keeps fm_composer_strip_ansi CSI-only (a shape read must not lose bytes it
+# navigates by), but these two fields are the only ones that leave this file as
+# PROSE for a supervisor to read, and claude wraps prose in OSC-8 hyperlinks
+# (verified live on its trust dialog, claude 2.1.238) which CSI stripping leaves
+# behind. Drop OSC sequences, then any remaining control byte, so no escape
+# reaches firstmate's context and no tab can split the probe's own fields.
+_fm_composer_dialog_text_var() {  # <varname>
+  local __fmdt_name=$1 __fmdt_text=${!1} __fmdt_esc
+  __fmdt_esc=$(printf '\033')
+  __fmdt_text=$(printf '%s' "$__fmdt_text" \
+    | LC_ALL=C sed "s/${__fmdt_esc}\][^${__fmdt_esc}$(printf '\007')]*\(${__fmdt_esc}\\\\\|$(printf '\007')\)//g" \
+    | LC_ALL=C tr -d '\001-\037\177')
+  printf -v "$__fmdt_name" '%s' "$__fmdt_text"
+  fm_composer_normalize_trim_var "$__fmdt_name"
+}
+
+# Every internal name is `__fmdo_`-prefixed (this file's convention): the
+# caller passes the names of ITS OWN variables in, and a plainly-named local
+# here would shadow them under bash's dynamic scoping, silently discarding
+# every result the function writes.
+_fm_composer_dialog_option_var() {  # <num-var> <label-var> <glyph-var> <trimmed-row>
+  local __fmdo_n=$1 __fmdo_l=$2 __fmdo_g=$3 __fmdo_row=$4 __fmdo_glyph='' __fmdo_num __fmdo_rest
+  printf -v "$__fmdo_n" '%s' ''
+  printf -v "$__fmdo_l" '%s' ''
+  printf -v "$__fmdo_g" '%s' ''
+  [ -n "$__fmdo_row" ] || return 1
+  if _fm_composer_leading_glyph_var __fmdo_glyph "$__fmdo_row" "$FM_COMPOSER_DIALOG_SELECT_GLYPHS"; then
+    __fmdo_row=${__fmdo_row#"$__fmdo_glyph"}
+    fm_composer_normalize_trim_var __fmdo_row
+  fi
+  __fmdo_num=${__fmdo_row%%[.)]*}
+  case "$__fmdo_num" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#__fmdo_num}" -le 2 ] || return 1
+  __fmdo_rest=${__fmdo_row#"$__fmdo_num"}
+  # `)` cannot appear inside a case pattern's bracket expression - it closes
+  # the pattern - so the two separators are spelled as two alternatives.
+  case "$__fmdo_rest" in
+    '.'[[:space:]]*|')'[[:space:]]*) ;;
+    *) return 1 ;;
+  esac
+  __fmdo_rest=${__fmdo_rest#?}
+  fm_composer_normalize_trim_var __fmdo_rest
+  [ -n "$__fmdo_rest" ] || return 1
+  printf -v "$__fmdo_n" '%s' "$__fmdo_num"
+  printf -v "$__fmdo_l" '%s' "$__fmdo_rest"
+  printf -v "$__fmdo_g" '%s' "$__fmdo_glyph"
+  return 0
+}
+
+# _fm_composer_dialog_row_matches: 0 when <row> names BOTH a key and the action
+# it takes. Both halves are required, so "press on" or a path containing "tab"
+# never scores on its own.
+_fm_composer_dialog_keyhint_row() {  # <trimmed-row>
+  local row=$1
+  [ -n "$row" ] || return 1
+  printf '%s' "$row" | grep -qiE "${FM_COMPOSER_DIALOG_KEY_RE:-$FM_COMPOSER_DIALOG_KEY_RE_DEFAULT}" || return 1
+  printf '%s' "$row" | grep -qiE "${FM_COMPOSER_DIALOG_ACTION_RE:-$FM_COMPOSER_DIALOG_ACTION_RE_DEFAULT}"
+}
+
+# Results are returned through FM_COMPOSER_DIALOG_* globals (bash 3.2 has no
+# nameref), matching _fm_composer_scan_screen's convention. Internal to this
+# owner; consumers read them through fm_composer_dialog_probe below.
+#
+# The caller must already have run _fm_composer_scan_screen over the same plain
+# screen, because the CONTAINMENT PRECONDITION is expressed entirely in that
+# scan's composer-shape results and must not be re-derived here.
+_fm_composer_dialog_scan() {  # <plain-screen>
+  local plain=$1 line row=0 total i num label glyph
+  local run_start=-1 run_end=-1 expect=0 glyphs=0 plains=0
+  local best_first=-1 best_last=-1 best_glyphs=0 best_plains=0 best_labels=''
+  local labels='' signals='' score=0 question='' options=''
+  local rows=()
+  FM_COMPOSER_DIALOG_SIGNALS=''
+  FM_COMPOSER_DIALOG_SCORE=0
+  FM_COMPOSER_DIALOG_FIRST=-1
+  FM_COMPOSER_DIALOG_LAST=-1
+  FM_COMPOSER_DIALOG_QUESTION=''
+  FM_COMPOSER_DIALOG_OPTIONS=''
+  while IFS= read -r line; do
+    fm_composer_normalize_trim_var line
+    rows[$row]=$line
+    row=$((row + 1))
+  done <<EOF
+$plain
+EOF
+  total=$row
+
+  # The ANCHOR: the bottom-most contiguous run of at least two rows numbered
+  # from 1 upward. Contiguous and ascending-from-1 so a transcript's scattered
+  # numbers, or a list continuing from an earlier screen, cannot be promoted.
+  # The loop runs one past the last row so a run ending at the bottom flushes.
+  i=0
+  while [ "$i" -le "$total" ]; do
+    num=''
+    if [ "$i" -lt "$total" ]; then
+      _fm_composer_dialog_option_var num label glyph "${rows[$i]}" || num=''
+    fi
+    if [ -n "$num" ] && [ "$run_start" -ge 0 ] && [ "$num" -eq $((expect + 1)) ]; then
+      run_end=$i
+      expect=$num
+      labels="${labels} / ${num}. ${label}"
+      if [ -n "$glyph" ]; then glyphs=$((glyphs + 1)); else plains=$((plains + 1)); fi
+    else
+      if [ "$run_start" -ge 0 ] && [ "$expect" -ge 2 ]; then
+        best_first=$run_start
+        best_last=$run_end
+        best_glyphs=$glyphs
+        best_plains=$plains
+        best_labels=${labels# / }
+      fi
+      run_start=-1; run_end=-1; expect=0; glyphs=0; plains=0; labels=''
+      if [ -n "$num" ] && [ "$num" -eq 1 ]; then
+        run_start=$i; run_end=$i; expect=1
+        labels="1. ${label}"
+        if [ -n "$glyph" ]; then glyphs=1; else plains=1; fi
+      fi
+    fi
+    i=$((i + 1))
+  done
+  [ "$best_first" -ge 0 ] || return 1
+
+  # THE CONTAINMENT PRECONDITION. A real modal has REPLACED the composer, so a
+  # candidate enclosed by a composer container, or with any composer container,
+  # bare agent-glyph row, or dead-shell prompt row still drawn BELOW it, is a
+  # numbered list inside or above a live composer - a transcript, a quoted
+  # brief, a multi-line typed message - and is refused. This, far more than the
+  # signal threshold, is what keeps a working worker from being called waiting.
+  if [ "$FM_COMPOSER_SCAN_BOX_BOTTOM" -ge 0 ]; then
+    [ "$FM_COMPOSER_SCAN_BOX_BOTTOM" -le "$best_last" ] || return 1
+    if [ "$FM_COMPOSER_SCAN_BOX_TOP" -lt "$best_first" ] \
+       && [ "$FM_COMPOSER_SCAN_BOX_BOTTOM" -gt "$best_last" ]; then
+      return 1
+    fi
+  fi
+  [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -le "$best_last" ] || return 1
+  if [ "$FM_COMPOSER_SCAN_LEFTBAR_END" -ge 0 ]; then
+    [ "$FM_COMPOSER_SCAN_LEFTBAR_END" -le "$best_last" ] || return 1
+    if [ "$FM_COMPOSER_SCAN_LEFTBAR_START" -le "$best_first" ] \
+       && [ "$FM_COMPOSER_SCAN_LEFTBAR_END" -ge "$best_last" ]; then
+      return 1
+    fi
+  fi
+  if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] && [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" = 1 ]; then
+    [ "$FM_COMPOSER_SCAN_PI_CLOSE" -le "$best_last" ] || return 1
+    if [ "$FM_COMPOSER_SCAN_PI_OPEN" -lt "$best_first" ] \
+       && [ "$FM_COMPOSER_SCAN_PI_CLOSE" -gt "$best_last" ]; then
+      return 1
+    fi
+  fi
+  [ "$FM_COMPOSER_SCAN_SHELL_ROW" -le "$best_last" ] || return 1
+  [ "$FM_COMPOSER_SCAN_BARE_ROW" -le "$best_last" ] || return 1
+  # A lone separator rule below the block is the same staleness evidence
+  # _fm_composer_select_cursorless treats as invalidating: it is the CLOSING
+  # rule of a composer whose opening rule fell above a bounded capture window,
+  # so the numbered rows are typed composer content seen through a keyhole.
+  # Without this a short enough window turns a composer into a dialog.
+  [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -le "$best_last" ] || return 1
+
+  # SIGNAL 1 - options: the anchor itself, already proven above.
+  signals='options'
+  score=1
+
+  # SIGNAL 2 - selection: exactly one row of the block is highlighted and at
+  # least one sibling is not. A run where every row (or no row) carries a
+  # glyph is a list, not a choice awaiting a keypress.
+  if [ "$best_glyphs" -eq 1 ] && [ "$best_plains" -ge 1 ]; then
+    signals="$signals selection"
+    score=$((score + 1))
+  fi
+
+  # SIGNAL 3 - keyhint: a row at or below the block naming a key and its
+  # action. Searched downward only: a modal's key legend sits under its
+  # choices, and searching upward would reach unrelated transcript prose.
+  i=$best_last
+  while [ "$i" -lt "$total" ]; do
+    if _fm_composer_dialog_keyhint_row "${rows[$i]}"; then
+      signals="$signals keyhint"
+      score=$((score + 1))
+      break
+    fi
+    i=$((i + 1))
+  done
+
+  # SIGNAL 4 - question: the nearest non-blank row within the lookback window
+  # above the block that ends in `?`. Kept for the wake payload either way, so
+  # firstmate is told what is being asked and not merely that something is.
+  i=$((best_first - 1))
+  row=$((best_first - FM_COMPOSER_DIALOG_QUESTION_LOOKBACK))
+  [ "$row" -ge 0 ] || row=0
+  while [ "$i" -ge "$row" ]; do
+    case "${rows[$i]}" in
+      '') ;;
+      *'?')
+        question=${rows[$i]}
+        signals="$signals question"
+        score=$((score + 1))
+        break
+        ;;
+      *) [ -n "$question" ] || question=${rows[$i]} ;;
+    esac
+    i=$((i - 1))
+  done
+
+  options=$best_labels
+  _fm_composer_dialog_text_var question
+  _fm_composer_dialog_text_var options
+  FM_COMPOSER_DIALOG_SIGNALS=$signals
+  FM_COMPOSER_DIALOG_SCORE=$score
+  FM_COMPOSER_DIALOG_FIRST=$best_first
+  FM_COMPOSER_DIALOG_LAST=$best_last
+  FM_COMPOSER_DIALOG_QUESTION=$question
+  FM_COMPOSER_DIALOG_OPTIONS=$options
+  [ "$score" -ge "$FM_COMPOSER_DIALOG_MIN_SIGNALS" ]
+}
+
+# fm_composer_dialog_probe: the ONE public dialog read, for every consumer that
+# must tell a worker parked on a confirmation apart from a worker still
+# working - bin/fm-watch.sh's per-poll capture and bin/fm-crew-state.sh's
+# current-state read. Prints nothing and returns 1 when no dialog is proven;
+# prints one tab-separated
+#   <signals>\t<question>\t<options>
+# line and returns 0 when one is. The screen may be styled or plain: every
+# signal is structural, so this reads the same on a styled=0 backend as on a
+# styled=1 one and needs no capability argument beyond the caps it is handed.
+fm_composer_dialog_probe() {  # <caps> <screen>
+  local screen=$2 plain
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  _fm_composer_scan_screen "$plain" ''
+  _fm_composer_dialog_scan "$plain" || return 1
+  printf '%s\t%s\t%s' \
+    "$FM_COMPOSER_DIALOG_SIGNALS" "$FM_COMPOSER_DIALOG_QUESTION" "$FM_COMPOSER_DIALOG_OPTIONS"
+}
+
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
   local styled=0 cursor=0 has_identity=0 kv plain
@@ -1201,6 +1467,17 @@ EOF
   fi
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" "$cy"
+  # A proven modal outranks every composer shape below, in BOTH cursor modes:
+  # the harness is not accepting typed input at all until it is answered, and
+  # its highlighted option row can otherwise read as a bare agent-glyph
+  # composer holding typed text (`❯ 1. Yes`), which is the one verdict the
+  # submit loops retry Enter on - and Enter on that row picks `1. Yes`.
+  # The scan above already ran over this plain screen, which is the containment
+  # evidence _fm_composer_dialog_scan requires.
+  if _fm_composer_dialog_scan "$plain"; then
+    printf 'dialog'
+    return 0
+  fi
   if [ -n "$cy" ]; then
     # Cursor mode (tmux): the shape CONTAINING the cursor is the composer.
     if [ "$FM_COMPOSER_SCAN_UNSAFE" = 1 ]; then

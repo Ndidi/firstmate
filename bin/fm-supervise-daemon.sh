@@ -414,6 +414,15 @@ classify_check() {  # <full reason>  — check scripts print only when firstmate
   printf 'escalate|%s' "$1"
 }
 
+# A proven harness confirmation always escalates: only firstmate decides what a
+# confirmation deserves, and away mode never widens that authority (some of
+# these are destructive by construction - the shape was first proven on
+# claude's dangerous-`rm` guard). The worker is healthy and waiting, so there is
+# nothing for the daemon to self-handle.
+classify_dialog() {  # <full reason>
+  printf 'escalate|%s' "$1"
+}
+
 classify_heartbeat() {
   # The wake itself is routine; the catch-all scan runs separately in
   # housekeeping on the HEARTBEAT_SCAN_SECS cadence.
@@ -1219,6 +1228,8 @@ handle_wake() {  # <reason> <state>
                   decision="escalate|${reason#stale: }" ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason") ;;
+    dialog:*) kind=dialog; arg="${reason#dialog: }"; arg="${arg%% \(*}"
+              decision=$(classify_dialog "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
     *)        decision=$(classify_unknown "$reason") ;;
   esac
@@ -1295,7 +1306,7 @@ handle_durable_wakes() {  # <watcher-reason> <state>
   while IFS="$tab" read -r epoch sequence kind key payload rest; do
     case "$epoch" in ''|*[!0-9]*) continue ;; esac
     case "$sequence" in ''|*[!0-9]*) continue ;; esac
-    case "$kind" in signal|stale|check|heartbeat) ;; *) continue ;; esac
+    case "$kind" in signal|stale|check|heartbeat|dialog) ;; *) continue ;; esac
     handle_wake "$payload" "$state"
     handled=$((handled + 1))
   done < "$out"

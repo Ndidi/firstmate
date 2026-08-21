@@ -220,6 +220,26 @@ crew_busy_verdict() {  # <target>
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
 }
 
+# crew_dialog_probe: the crew's pane read for a harness confirmation it cannot
+# answer itself. Shape knowledge belongs to the one composer owner
+# (bin/fm-composer-lib.sh, fm_composer_dialog_probe); this only supplies the
+# capture. Prints "<question>${SEP}<options>" and returns 0 when a dialog is
+# proven, nothing and 1 otherwise. Read BEFORE the busy verdict below, because
+# every busy source correctly reports busy while a modal is up: the turn has
+# genuinely not ended, so busy is true and useless, and reporting `working`
+# from it is what hid a parked worker for an hour.
+crew_dialog_probe() {  # <target>
+  local screen probe question options
+  screen=$(fm_backend_capture "$TASK_BACKEND" "$1" "$FM_COMPOSER_DIALOG_CAPTURE_LINES" "$EXPECTED_LABEL" 2>/dev/null) || return 1
+  probe=$(fm_composer_dialog_probe '' "$screen") || return 1
+  question=$(printf '%s' "$probe" | cut -f2)
+  options=$(printf '%s' "$probe" | cut -f3)
+  printf '%s' "awaiting a human answer"
+  [ -n "$question" ] && printf '%s' ": $question"
+  [ -n "$options" ] && printf '%s' "${SEP}options: $options"
+  return 0
+}
+
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
 # trim, strip_quotes, the bounded nm_run call, nm_field's TOON parse, and the
 # branch+head attribution rule below are thin wrappers over the ONE owner in
@@ -597,6 +617,13 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 # verdict permits the status-log fallback below. Missing, malformed, stale, or
 # unverified semantic state remains unknown.
 if [ "$KIND" != secondmate ]; then
+  # A proven confirmation outranks the busy verdict: the worker is healthy and
+  # deliberately waiting, which is `parked` (a decision is owed), not `working`.
+  # `parked` is also what makes fm-classify-lib.sh's crew_absorb_class report
+  # `none`, so the watcher surfaces this crew instead of absorbing it.
+  if DIALOG_DETAIL=$(crew_dialog_probe "$BACKEND_TARGET"); then
+    emit parked pane "$DIALOG_DETAIL"
+  fi
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;

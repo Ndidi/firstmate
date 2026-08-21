@@ -88,6 +88,16 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# The per-line cap owner, for the one wake payload here that carries harness
+# prose (a confirmation's question and options) rather than a fixed reason.
+# shellcheck source=bin/fm-line-cap-lib.sh
+. "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# The composer/dialog shape owner. Sourced directly and not through an adapter:
+# the confirmation read below runs on the capture this loop already took, for
+# whatever backend recorded the window, and no backend may hold shape knowledge
+# of its own. Self-contained, so this adds no source-graph expansion.
+# shellcheck source=bin/fm-composer-lib.sh
+. "$SCRIPT_DIR/fm-composer-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -167,6 +177,12 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-$FM_BUSY_TURN_MAX_SECS_DEFAULT}
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+# How long a pane may sit on the SAME proven confirmation before it is surfaced
+# again. A confirmation is not a declared external wait: nothing clears it on
+# its own, so the cadence is the wedge cadence rather than the hour-long pause
+# one. The first sighting always surfaces immediately; this only bounds how
+# long an unanswered one can stay quiet after that.
+DIALOG_RESURFACE_SECS=${FM_DIALOG_RESURFACE_SECS:-$STALE_ESCALATE_SECS}
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section
@@ -321,6 +337,61 @@ busy_turn_over_age() {  # <task>
   f="$STATE/$task.turn-ended"
   [ -e "$f" ] || f="$STATE/$task.meta"
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
+}
+
+# dialog_check: surface a pane the harness has parked on a confirmation only it
+# cannot answer. Returns 0 when a confirmation is proven (the caller then skips
+# the staleness machinery for this poll, because this pane's condition is
+# already named more precisely than any stale reason could name it), 1 when
+# none is.
+#
+# WHY THIS IS NOT PART OF THE STALE PATH: a modal keeps the harness mid-turn,
+# so every busy source correctly reports busy and the pane never becomes stale
+# at all - it was BUSY_TURN_MAX_SECS an hour later, wearing the generic
+# "possible wedge" wording, that eventually surfaced the case this replaces.
+# The worker is not wedged, it is politely waiting, and the action it needs is
+# one answer rather than any recovery procedure.
+#
+# Shape knowledge belongs entirely to bin/fm-composer-lib.sh; this reads the
+# capture already taken for hashing and adds no second capture per poll.
+# BUSY_TURN_MAX_SECS is untouched and still owns the no-dialog hang: this
+# returns 1 the moment the confirmation is gone, and the aging it depends on
+# (state/<id>.turn-ended, else the spawn record) is never written here.
+dialog_check() {  # <window> <task> <tail40> <hash>
+  local win=$1 task=$2 tail40=$3 h=$4 key probe question options reason age since
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  if ! probe=$(fm_composer_dialog_probe '' "$tail40"); then
+    rm -f "$STATE/.dialog-$key" "$STATE/.dialog-since-$key"
+    return 1
+  fi
+  question=$(printf '%s' "$probe" | cut -f2)
+  options=$(printf '%s' "$probe" | cut -f3)
+  reason="dialog: $win (fm-$task is waiting for a human answer"
+  [ -n "$question" ] && reason="$reason: $question"
+  [ -n "$options" ] && reason="$reason - options: $options"
+  reason="$reason)"
+  since=$(cat "$STATE/.dialog-since-$key" 2>/dev/null || true)
+  case "$since" in ''|*[!0-9]*) since='' ;; esac
+  if [ "$(cat "$STATE/.dialog-$key" 2>/dev/null || true)" = "$h" ] && [ -n "$since" ]; then
+    age=$(( $(date +%s) - since ))
+    if [ "$age" -lt "$DIALOG_RESURFACE_SECS" ]; then
+      triage_log "absorbed dialog (already surfaced ${age}s ago): $win"
+      return 0
+    fi
+    reason="dialog: $win (fm-$task is STILL waiting for a human answer after ${age}s"
+    [ -n "$question" ] && reason="$reason: $question"
+    [ -n "$options" ] && reason="$reason - options: $options"
+    reason="$reason)"
+  fi
+  reason=$(fm_cap_line "$reason")
+  printf '%s' "$h" > "$STATE/.dialog-$key"
+  date +%s > "$STATE/.dialog-since-$key"
+  # A confirmation is never a wedge: drop any wedge bookkeeping so the pane
+  # cannot also escalate as one behind this reason.
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  fm_wake_append dialog "$win" "$reason" || exit 1
+  wake "$reason"
+  return 0
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -1033,6 +1104,16 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    # Checked on every poll, busy or idle: a confirmation is visible the
+    # instant it is drawn, and which side of the busy line the pane falls on
+    # depends only on the harness's turn bookkeeping, not on whether a human
+    # is being waited for. Keep the hash bookkeeping current so the staleness
+    # machinery resumes cleanly - and never double-surfaces - once it clears.
+    if dialog_check "$w" "$task" "$tail40" "$h"; then
+      printf '%s' "$h" > "$hf"
+      echo 0 > "$cf"
+      continue
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"

@@ -51,6 +51,10 @@ watch_bg() {  # <state> <fakebin> <out> [extra env assignments...]
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" > "$out" &
 }
 
+# beat_sig, reap and wait_watcher_cycles - the primitives for driving a real
+# watcher subprocess and waiting on its poll beacon - live in
+# tests/wake-helpers.sh, shared with the other suites that drive one.
+
 # Wait up to <limit> 0.1s ticks while <pid> stays alive; 0 if still alive, 1 if it died.
 # A fixed stretch of clock proves only that the process had not exited YET, so
 # this is reserved for a subject with no observable progress signal (a one-shot
@@ -68,14 +72,6 @@ wait_live() {
 
 # Beacon signature at sub-second resolution. seen_sig/file_mtime report whole
 # seconds, which cannot tell two poll bodies apart inside the same second.
-beat_sig() {
-  if [ "$(uname)" = Darwin ]; then
-    stat -f '%Fm' "$1" 2>/dev/null
-  else
-    stat -c '%.9Y' "$1" 2>/dev/null
-  fi
-}
-
 # wait_watcher_cycles <state> <pid> [cycles]
 # Wait until the watcher has completed <cycles> full poll bodies without exiting;
 # 0 once it has, 1 the moment <pid> dies, and a named failure at the deadline.
@@ -88,33 +84,6 @@ beat_sig() {
 # poll, and the assertion that follows would then hold only because the watcher
 # had not looked yet. It is also the faster of the two whenever the machine is
 # healthy, because it stops at the evidence instead of at the clock.
-wait_watcher_cycles() {  # <state> <pid> [cycles]
-  local state=$1 pid=$2 cycles=${3:-2} beat deadline seen=0 last='' sig started
-  beat="$state/.last-watcher-beat"
-  started=$(date +%s%N)
-  deadline=$(($(date +%s) + FM_TEST_WAIT_TIMEOUT))
-  while :; do
-    if ! kill -0 "$pid" 2>/dev/null; then
-      fm_wait_trace "$started" exited "watcher poll cycles"
-      return 1
-    fi
-    sig=$(beat_sig "$beat")
-    if [ -n "$sig" ] && [ "$sig" != "$last" ]; then
-      [ -z "$last" ] || seen=$((seen + 1))
-      last=$sig
-      if [ "$seen" -ge "$cycles" ]; then
-        fm_wait_trace "$started" held "$cycles watcher poll cycles"
-        return 0
-      fi
-    fi
-    if [ "$(date +%s)" -ge "$deadline" ]; then
-      fm_wait_timeout "$FM_TEST_WAIT_TIMEOUT" \
-        "the watcher to complete $cycles poll cycles (saw $seen)" \
-        "$([ -e "$beat" ] && printf 'beacon last touched %s\n' "$(beat_sig "$beat")" || printf 'beacon %s was never touched\n' "$beat")"
-    fi
-    sleep 0.02
-  done
-}
 
 wait_numeric_file() {
   local file=$1 limit=${2:-30} i=0 value
@@ -174,8 +143,6 @@ record_pi_busy() {  # <state-dir> <id>
   "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
     --source pi-ext --event agent-start
 }
-
-reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 

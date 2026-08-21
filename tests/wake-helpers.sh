@@ -274,6 +274,57 @@ SH
   printf '%s\n' "$dir"
 }
 
+# --- driving a real watcher subprocess ---------------------------------------
+# Shared by every suite that starts bin/fm-watch.sh and needs to know it did
+# work: the watcher touches .last-watcher-beat on EVERY poll, including while
+# absorbing a benign wake, so the beacon is the only evidence that distinguishes
+# "absorbed and still blocking" from "has not polled yet". A test that asserts
+# an absorb must wait on completed cycles rather than a stretch of clock, or it
+# proves only that the watcher had not exited YET.
+
+# beat_sig <file>: the beacon's mtime at sub-second resolution, so two touches
+# inside the same second are still distinguishable.
+beat_sig() {
+  if [ "$(uname)" = Darwin ]; then
+    stat -f '%Fm' "$1" 2>/dev/null
+  else
+    stat -c '%.9Y' "$1" 2>/dev/null
+  fi
+}
+
+reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+
+# wait_watcher_cycles <state> <pid> [cycles]: 0 once the watcher at <pid> has
+# completed <cycles> polls, 1 if it exited first (which for an absorb case is
+# the failure being tested for).
+wait_watcher_cycles() {  # <state> <pid> [cycles]
+  local state=$1 pid=$2 cycles=${3:-2} beat deadline seen=0 last='' sig started
+  beat="$state/.last-watcher-beat"
+  started=$(date +%s%N)
+  deadline=$(($(date +%s) + FM_TEST_WAIT_TIMEOUT))
+  while :; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      fm_wait_trace "$started" exited "watcher poll cycles"
+      return 1
+    fi
+    sig=$(beat_sig "$beat")
+    if [ -n "$sig" ] && [ "$sig" != "$last" ]; then
+      [ -z "$last" ] || seen=$((seen + 1))
+      last=$sig
+      if [ "$seen" -ge "$cycles" ]; then
+        fm_wait_trace "$started" held "$cycles watcher poll cycles"
+        return 0
+      fi
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      fm_wait_timeout "$FM_TEST_WAIT_TIMEOUT" \
+        "the watcher to complete $cycles poll cycles (saw $seen)" \
+        "$([ -e "$beat" ] && printf 'beacon last touched %s\n' "$(beat_sig "$beat")" || printf 'beacon %s was never touched\n' "$beat")"
+    fi
+    sleep 0.02
+  done
+}
+
 wait_for_exit() {
   local pid=$1 limit=${2:-50} i=0
   while [ "$i" -lt "$limit" ]; do
