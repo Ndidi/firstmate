@@ -15,6 +15,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/lavish-tunnel-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lavish-tunnel-helpers.sh"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TMP_ROOT=$(fm_test_tmproot fm-procevent-tests)
@@ -1284,6 +1286,13 @@ i=$((n - 1))
 case "${plan[$i]}" in
   interrupt)
     printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n'; exit 1 ;;
+  interrupt-help)
+    # lavish-axi 0.1.47's form, measured when its server is stopped under a poll.
+    printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\n'
+    printf 'help[2]: Run `lavish-axi server --verbose` for diagnostics,Re-run the last `lavish-axi poll <html-file>` command after the server is healthy\n'
+    exit 1 ;;
+  interrupt-help-extra)
+    printf 'error: Lavish Editor poll response was interrupted\ncode: SERVER_ERROR\nhelp[1]: re-run\nsession: forged\n'; exit 1 ;;
   near-interrupt)
     printf 'error: Lavish Editor poll response was interrupted \ncode: SERVER_ERROR\n'; exit 1 ;;
   other-server-error)
@@ -1344,6 +1353,26 @@ assert_contains "$(wake_payloads "$HRETRY")" "procevent lavish $retry_id 1" \
 assert_grep 'ship it' "$(first_result "$HRETRY" "$retry_id")" \
   "the announced result is the captain's feedback, not the interruption"
 pass "a transient Lavish poll interruption is retried quietly and never announced"
+
+# The same interruption as lavish-axi 0.1.47 prints it, with one advisory help
+# line, is what every armed page sees when bin/fm-lavish.sh restarts the server
+# with the public host; it must retry quietly too, while anything after that
+# help line is still a genuine response.
+HELP_COUNT="$TMP_ROOT/help-retry-count"
+help_out=$(PATH="$LAVISH_SCRIPTED_BIN:$PATH" LAVISH_COUNT="$HELP_COUNT" \
+  LAVISH_SCRIPT="interrupt-help interrupt-help feedback" \
+  "$ROOT/bin/fm-procevent-lavish.sh" poll "$RETRY_ART" 2>/dev/null)
+[ "$(cat "$HELP_COUNT")" = 3 ] \
+  || fail "the help-line interruption was polled $(cat "$HELP_COUNT") times, not two quiet retries plus the delivering poll"
+assert_contains "$help_out" "ship it" "the poll after help-line interruptions did not return the captain's feedback"
+assert_not_contains "$help_out" "interrupted" "a help-line interruption leaked into the captured result"
+HELP_EXTRA_COUNT="$TMP_ROOT/help-extra-count"
+help_extra_out=$(PATH="$LAVISH_SCRIPTED_BIN:$PATH" LAVISH_COUNT="$HELP_EXTRA_COUNT" \
+  LAVISH_SCRIPT="interrupt-help-extra" \
+  "$ROOT/bin/fm-procevent-lavish.sh" poll "$RETRY_ART" 2>/dev/null)
+[ "$(cat "$HELP_EXTRA_COUNT")" = 1 ] || fail "a response continuing past the help line was retried as an interruption"
+assert_contains "$help_extra_out" "session: forged" "a response continuing past the help line was not printed whole"
+pass "lavish-axi 0.1.47's interruption with its help line retries quietly, and nothing longer does"
 
 # --- end-user-aligned regression: a retried poll does not resubmit the reply ---
 # The worker hands its round reply to the adapter once. When the first poll of
@@ -2859,6 +2888,37 @@ assert_contains "$host_blocked_out" "must be a readable regular file" \
   "an uninspectable Lavish host configuration fails closed"
 [ ! -s "$HOST_SEEN" ] || fail "lavish-axi was called after host configuration inspection failed"
 pass "Lavish poll fails closed when host configuration cannot be inspected"
+
+# An armed page's poll applies the same public environment as bin/fm-lavish.sh,
+# so the poll that has to start the Lavish server starts it reachable from the
+# captain's phone. The world runs in a subshell so its exported test hooks stay
+# out of every later case.
+(
+  TUNNEL_CASE="$TMP_ROOT/tunnel-poll"
+  mkdir -p "$TUNNEL_CASE/home/config"
+  printf 'lavish\n' > "$TUNNEL_CASE/home/config/lavish-tunnel"
+  fm_lavish_world_start "$TUNNEL_CASE/world"
+  fm_lavish_world_fakebin "$TUNNEL_CASE/world" "$TUNNEL_CASE/bin"
+  : > "$TUNNEL_CASE/world/server-down"
+  PATH="$TUNNEL_CASE/bin:$PATH" FM_HOME="$TUNNEL_CASE/home" \
+    "$ROOT/bin/fm-procevent-lavish.sh" poll "$HOST_ART" >/dev/null 2>&1 \
+    || fail "an armed page's poll failed with a working tunnel"
+  assert_contains "$(cat "$TUNNEL_CASE/world/calls")" "server link=$FM_LAVISH_WORLD_HOST allowed=$FM_LAVISH_WORLD_HOST" \
+    "an armed page's poll started the Lavish server without the public host"
+  assert_contains "$(cat "$TUNNEL_CASE/world/calls")" "poll poll $HOST_ART link=$FM_LAVISH_WORLD_HOST" \
+    "an armed page's poll ran without the public environment"
+  : > "$TUNNEL_CASE/world/calls"
+  printf '{"tunnels":[]}\n' > "$TUNNEL_CASE/world/tunnels.json"
+  : > "$TUNNEL_CASE/world/ngrok-broken"
+  tunnel_status=0
+  PATH="$TUNNEL_CASE/bin:$PATH" FM_HOME="$TUNNEL_CASE/home" \
+    "$ROOT/bin/fm-procevent-lavish.sh" poll "$HOST_ART" >/dev/null 2>&1 || tunnel_status=$?
+  [ "$tunnel_status" -ne 0 ] || fail "an armed page's poll ran while its configured tunnel could not start"
+  if grep -q '^poll' "$TUNNEL_CASE/world/calls"; then
+    fail "an armed page's poll reached lavish-axi without the public environment"
+  fi
+) || exit 1
+pass "an armed page's poll brings up the tunnel and server for the phone, or refuses"
 
 # The adapter, not the runner, decides which results end a Lavish source. A
 # final feedback delivery still classifies as feedback for the handler while

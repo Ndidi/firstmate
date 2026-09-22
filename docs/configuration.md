@@ -384,7 +384,31 @@ The optional local, gitignored `config/lavish-axi-host` contains one non-empty a
 `fm-spawn.sh` exports that address into every new worker and relaunch, the process-event adapter reads it before each `lavish-axi` invocation, and the file is inherited into secondmate homes through the primary-authoritative configuration contract.
 When the file is absent, worker launches do not add a board address and retain the existing ambient-environment behavior.
 Malformed or unreadable values refuse the launch before the worker starts, while the adapter refuses the same malformed value before polling.
-The address selects the existing shared server; it does not authorize starting or stopping the server, and the Lavish startup crash remains a vendor-tool concern.
+The address selects the shared server; only the public-link path below starts or restarts it, a tunnel that forwards to localhost cannot reach a server bound only to another address, and the Lavish startup crash remains a vendor-tool concern.
+
+## Lavish public links (config/lavish-tunnel)
+
+The optional local, gitignored `config/lavish-tunnel` holds one ngrok tunnel name, defined in this machine's own ngrok configuration, that forwards to the Lavish server; its presence routes every captain-facing Lavish page through that tunnel.
+`bin/fm-lavish.sh open <artifact.html>` is the one way to put a page in front of the captain, and its `link: https://<host>/session/<id>` line is the only link to send.
+Before opening, it starts the tunnel unless ngrok already runs it, reads the public hostname from ngrok's local API rather than assuming a domain, restarts the Lavish server when it was started without that hostname allowed, and checks that the public URL asks for a password.
+Running it on a page that is already open resumes the session and prints the same link, so it also turns a page a worker or another tool opened into a link for the captain's phone.
+`bin/fm-lavish.sh poll`, the armed-source poll in `bin/fm-procevent-lavish.sh`, and `bin/fm-bearings-board.sh` apply the same environment, so whichever of them has to start the server starts it reachable from the phone.
+Without the file, `open` and the bearings board refuse rather than print a link that only works on this computer, and polls run locally.
+A present file that cannot be read or holds no valid name, a tunnel that cannot start, forwards to another port, or answers without a password, and a server that keeps coming back without the hostname all refuse instead of falling back.
+The tunnel must use basic auth, never Google OAuth: Lavish's sandboxed frame loads `/sdk.js` without the OAuth cookie, so every queue button on the page stops working.
+Restarting the server interrupts every Lavish poll running on the machine; armed sources reattach through their own retry, and `open` reports the restart so a foreground poll can be re-run.
+The file is inherited into secondmate homes through the primary-authoritative configuration contract, and [`bin/fm-lavish-lib.sh`](../bin/fm-lavish-lib.sh)'s header owns the exact sequence.
+A matching ngrok definition, whose name goes in the file:
+
+```yaml
+tunnels:
+  lavish:
+    proto: http
+    addr: 4387
+    domain: <reserved-domain>.ngrok-free.app
+    basic_auth:
+      - "<user>:<password>"
+```
 
 ## Home brief include (config/brief-include.md)
 
@@ -882,7 +906,7 @@ Never run the registered blocking source command directly in a conversational tu
 A long-polling external process is registered as a *source* through its adapter, whose header and `--help` own the commands and flags.
 `bin/fm-procevent.sh` owns the generic contract; built-in adapters retain their tracked `bin/fm-procevent-<adapter>.sh` commands, while an explicitly bound external adapter routes through the trusted host contract above.
 `bin/fm-procevent-lavish.sh` is the first built-in adapter and wraps only the currently published `lavish-axi poll` interface.
-That adapter, and only that adapter, retries the one exact transient response a cut-short listener returns while its marks remain available (`error: Lavish Editor poll response was interrupted` with `code: SERVER_ERROR`), up to 12 times with poll starts at least 5 seconds apart, so an internal retry never reaches the runner as a captured result.
+That adapter, and only that adapter, retries the one exact transient response a cut-short listener returns while its marks remain available (`error: Lavish Editor poll response was interrupted` with `code: SERVER_ERROR`, optionally followed by the single advisory `help[<n>]:` line lavish-axi 0.1.47 appends), up to 12 times with poll starts at least 5 seconds apart, so an internal retry never reaches the runner as a captured result.
 This start-to-start governor is a no-op after a normally blocking poll but caps an immediately returning poll under the shipped defaults independently of the owner lease and registration launch pacing.
 Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that same interruption still standing once the bound is spent are all captured and announced normally; `FM_LAVISH_POLL_RETRY_DELAY` is a bounded 1 to 60 second test override for the interval only, and the runner itself stays adapter-agnostic.
 An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so re-arm a live board once to adopt this retry policy.
@@ -890,7 +914,7 @@ An already-armed Lavish source keeps its registered listener command until it is
 ### Crew-hosted Lavish review boards
 
 A live task that hosts a Lavish board owns its listener, so firstmate must never arm that board.
-The worker arms it with `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>` and never runs `lavish-axi poll` itself.
+The worker opens it with `bin/fm-lavish.sh open <artifact.html>`, reports that command's `link:` URL, arms it with `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>`, and never runs `lavish-axi` or `lavish-axi poll` itself.
 The arm is refused unless that task id has valid, identity-matching endpoint metadata, because a board whose owner has no endpoint would collect feedback nobody can be told about.
 The registration persists as one task-owned source record, while each captured nonterminal round remains open until the worker re-arms and the existing handled marker acknowledges that round.
 Re-arm is that acknowledgement and nothing else: the board is armed once while no record exists, and a further arm by the same owner is refused unless an unacknowledged nonterminal round is waiting, so a generation already carrying a reply is never replaced before its listener posts it.

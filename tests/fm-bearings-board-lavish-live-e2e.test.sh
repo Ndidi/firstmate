@@ -17,6 +17,12 @@
 # a human. The artifact is a scratch page in a temporary directory, and the
 # session it opens is ended again before the guard returns.
 #
+# The board opens only through the public tunnel (bin/fm-lavish-lib.sh), so the
+# guard runs the real lavish-axi on its own port and state directory behind
+# tests/lavish-tunnel-helpers.sh's stand-in ngrok API and public edge, and a
+# fake ngrok that cannot start anything: the machine's own tunnel, Lavish
+# server, and sessions are never touched.
+#
 # Standard CI has no lavish-axi, so this reports a capability skip there. The
 # portable counterpart in tests/fm-bearings-board.test.sh pins the build's logic
 # in CI against a stub that reproduces these shapes. Run this guard after a
@@ -25,19 +31,27 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/lavish-tunnel-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lavish-tunnel-helpers.sh"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-fm_live_gate default-on FM_BEARINGS_LAVISH_LIVE lavish-axi jq curl
+fm_live_gate default-on FM_BEARINGS_LAVISH_LIVE lavish-axi jq curl python3
 
 pass() { printf 'ok - %s\n' "$1"; }
 note() { printf '# %s\n' "$1"; }
 
 LAB=''
+# Set only once LAVISH_AXI_PORT names this guard's own server: before that,
+# `lavish-axi stop` would reach the machine's real one.
+ISOLATED_PORT=''
 cleanup() {
   [ -z "$LAB" ] || {
+    FM_HOME="$LAB" FM_STATE_OVERRIDE="$LAB/state" FM_PROCEVENT_CLAIM_ROOT="$LAB/procevent-claims" \
+      "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
     [ ! -f "$LAB/.lavish/bearings-board.html" ] \
       || lavish-axi end "$LAB/.lavish/bearings-board.html" >/dev/null 2>&1 || true
+    [ -z "$ISOLATED_PORT" ] || lavish-axi stop >/dev/null 2>&1 || true
     rm -rf "$LAB"
   }
 }
@@ -49,7 +63,18 @@ note "lavish-axi ${VERSION:-version-unknown}"
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-bearings-lavish-live.XXXXXX") || fail "cannot create the guard lab"
 LAB=$(cd -P -- "$LAB" && pwd -P)
-mkdir -p "$LAB/state" "$LAB/data"
+mkdir -p "$LAB/state" "$LAB/data" "$LAB/config"
+printf 'lavish\n' > "$LAB/config/lavish-tunnel"
+
+fm_lavish_world_start "$LAB/lavish-world"
+FAKEBIN="$LAB/fakebin"
+fm_lavish_world_fakebin "$LAB/lavish-world" "$FAKEBIN"
+rm -f "$FAKEBIN/lavish-axi"
+: > "$LAB/lavish-world/ngrok-broken"
+LAVISH_AXI_PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+export LAVISH_AXI_PORT LAVISH_AXI_NO_OPEN=1
+ISOLATED_PORT=$LAVISH_AXI_PORT
+fm_lavish_world_tunnel "$LAB/lavish-world" lavish "https://$FM_LAVISH_WORLD_HOST" "http://127.0.0.1:$LAVISH_AXI_PORT"
 
 cat > "$LAB/payload.json" <<'JSON'
 {
@@ -73,7 +98,7 @@ cat > "$LAB/payload.json" <<'JSON'
 JSON
 
 run_board() {
-  FM_HOME="$LAB" FM_STATE_OVERRIDE="$LAB/state" FM_DATA_OVERRIDE="$LAB/data" \
+  PATH="$FAKEBIN:$PATH" FM_HOME="$LAB" FM_STATE_OVERRIDE="$LAB/state" FM_DATA_OVERRIDE="$LAB/data" \
     FM_PROCEVENT_CLAIM_ROOT="$LAB/procevent-claims" \
     "$ROOT/bin/fm-bearings-board.sh" "$@"
 }
@@ -88,7 +113,9 @@ case "$url" in
   *) fail "could not read the guard board session url: $url" ;;
 esac
 key=${url##*/}
-base=${url%/session/*}
+# The session url carries the public host the board was opened for; the
+# captain's End button reaches this isolated server directly.
+base="http://127.0.0.1:$LAVISH_AXI_PORT"
 
 # End it exactly as the browser's End session button does.
 curl -fsS -X POST "$base/api/$key/end" >/dev/null 2>&1 \

@@ -80,7 +80,11 @@
 # second poller was present; it is not a normal idle round. browser_disconnected
 # means the session remains open and is handled as a silent reconnect wait.
 # The poll reads config/lavish-axi-host from FM_HOME before every lavish-axi
-# invocation so firstmate and workers reach the same server.
+# invocation so firstmate and workers reach the same server, then applies
+# bin/fm-lavish-lib.sh's public environment when config/lavish-tunnel is set, so
+# a poll that has to start the Lavish server starts it reachable from the
+# captain's phone; a configured tunnel that cannot be brought up fails the poll
+# rather than starting a server the phone cannot reach.
 #
 # `answers` is this adapter's half of the generic keyed-answer contract in
 # bin/fm-procevent.sh. It reports what the captain actually chose, as
@@ -105,10 +109,14 @@
 #
 # BOUNDED QUIET RETRY, owned here and nowhere else. A live listener can be cut
 # short by the server with exactly this two-line response while the session's
-# marks remain available:
+# marks remain available, including when bin/fm-lavish-lib.sh restarts the
+# server with the public host:
 #
 #   error: Lavish Editor poll response was interrupted
 #   code: SERVER_ERROR
+#
+# lavish-axi 0.1.47 appends one advisory `help[<n>]: ...` line to it, which is
+# part of the same response and carries no data.
 #
 # That is an internal retry, not news, so registering the raw poll made the
 # generic runner capture it and wake the whole fleet. `poll` therefore re-runs
@@ -138,6 +146,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-procevent-lib.sh
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
+# shellcheck source=bin/fm-lavish-lib.sh
+. "$SCRIPT_DIR/fm-lavish-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
@@ -265,10 +275,11 @@ POLL_RETRY_DELAY_DEFAULT=5
 POLL_RETRY_DELAY_MIN=1
 POLL_RETRY_DELAY_MAX=60
 
-# Exit 0 only for the exact two-line interruption, and nothing else. The whole
-# response must be those two lines with those exact bytes: whitespace variants,
-# a longer response that merely opens with them, and any other SERVER_ERROR are
-# genuine errors this adapter must never swallow.
+# Exit 10 only for the exact two-line interruption, optionally followed by one
+# `help[<n>]: ...` line, and nothing else. The first two lines must be those
+# exact bytes: whitespace variants, any other trailing content, and any other
+# SERVER_ERROR are genuine errors this adapter must never swallow. A response
+# stops being buffered, and streams through, as soon as it cannot be that one.
 poll_response_filter() {  # <response-file>
   perl -e '
     use strict;
@@ -280,6 +291,25 @@ poll_response_filter() {  # <response-file>
     binmode STDOUT;
     binmode $staged;
     my ($candidate, $streaming) = ("", 0);
+    my $help_line_cap = 1024;
+    # True while <c> is still a prefix of the interruption, optionally followed
+    # by one help line of bounded length.
+    sub could_be_interruption {
+      my ($c) = @_;
+      my $n = length $expected;
+      return substr($expected, 0, length $c) eq $c if length($c) <= $n;
+      return 0 unless substr($c, 0, $n) eq $expected;
+      my $rest = substr($c, $n);
+      return 0 if length($rest) > $help_line_cap;
+      return $rest =~ /\A(?:h(?:e(?:l(?:p(?:\[(?:[0-9]+(?:\](?::(?: [^\n]*\n?)?)?)?)?)?)?)?)?)?\z/ ? 1 : 0;
+    }
+    sub is_interruption {
+      my ($c) = @_;
+      return 1 if $c eq $expected;
+      my $n = length $expected;
+      return 0 unless length($c) > $n && substr($c, 0, $n) eq $expected;
+      return substr($c, $n) =~ /\Ahelp\[[0-9]+\]: [^\n]*\n\z/ ? 1 : 0;
+    }
     sub write_all {
       my ($handle, $bytes) = @_;
       my $offset = 0;
@@ -297,20 +327,17 @@ poll_response_filter() {  # <response-file>
         write_all(*STDOUT, $chunk);
         next;
       }
-      my $room = length($expected) + 1 - length($candidate);
-      my $take = length($chunk) < $room ? length($chunk) : $room;
-      my $prefix = substr($chunk, 0, $take);
-      $candidate .= $prefix;
-      write_all($staged, $prefix);
-      my $matches_prefix = length($candidate) <= length($expected)
-        && substr($expected, 0, length($candidate)) eq $candidate;
-      if (!$matches_prefix) {
+      $candidate .= $chunk;
+      if (!could_be_interruption($candidate)) {
         write_all(*STDOUT, $candidate);
-        write_all(*STDOUT, substr($chunk, $take));
         $streaming = 1;
+        next;
       }
+      # Only bytes that can still be the interruption are ever staged, so the
+      # staging stays bounded by the interruption plus one capped help line.
+      write_all($staged, $chunk);
     }
-    exit 10 if !$streaming && $candidate eq $expected;
+    exit 10 if !$streaming && is_interruption($candidate);
     write_all(*STDOUT, $candidate) unless $streaming;
   ' "$1"
 }
@@ -380,6 +407,11 @@ cmd_poll() {
     apply_configured_lavish_host "$original_host_present" "$original_host"
     [ -f "$artifact" ] && [ ! -L "$artifact" ] && [ -r "$artifact" ] \
       || die "artifact is no longer a readable file: $artifact"
+    fm_lavish_public_env
+    case "$?" in
+      0 | 3) ;;
+      *) die "cannot keep the Lavish page reachable from the captain's phone; see the fm-lavish error above" ;;
+    esac
     # Posting a round's reply is BEST EFFORT and deliberately carries no delivery
     # machinery. The staged file is the only record that a reply is owed, so it is
     # consumed HERE - after every non-posting step that could abort this poll has

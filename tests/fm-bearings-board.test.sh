@@ -7,11 +7,21 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/lavish-tunnel-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lavish-tunnel-helpers.sh"
 
 BOARD="$ROOT/bin/fm-bearings-board.sh"
 TMP_ROOT=$(fm_test_tmproot fm-bearings-board)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+command -v python3 >/dev/null 2>&1 || fail "python3 is required for the fake ngrok and Lavish world"
+
+# Every board opens through the public tunnel. One stand-in tunnel and server,
+# already up and accepting the public host, serve every home below, so these
+# cases exercise the board rather than the tunnel (tests/fm-lavish.test.sh).
+fm_lavish_world_start "$TMP_ROOT/lavish-world"
+fm_lavish_world_tunnel "$TMP_ROOT/lavish-world"
+fm_lavish_world_allow "$TMP_ROOT/lavish-world" "$FM_LAVISH_WORLD_HOST"
 
 # A lavish-axi stub that reproduces the shapes verified against the real
 # lavish-axi 0.1.61, because the build's liveness verdict is read from what the
@@ -26,7 +36,8 @@ make_home() {  # <name>
   # inside a command substitution, so an array append here never reaches the
   # caller and every listener this suite started used to survive the run.
   fm_test_track_procevent_home "$home" "$home/procevent-claims"
-  mkdir -p "$home/state" "$home/data" "$home/lavish-state"
+  mkdir -p "$home/state" "$home/data" "$home/lavish-state" "$home/config"
+  printf 'lavish\n' > "$home/config/lavish-tunnel"
   fakebin=$(fm_fakebin "$home")
   cat > "$fakebin/lavish-axi" <<'SH'
 #!/usr/bin/env bash
@@ -315,6 +326,9 @@ test_build_injects_binds_then_arms() {
   out=$(run_board "$home" build "$data") || fail "a valid payload did not build"
   assert_contains "$out" "board: $board" "build did not report the board path: $out"
   assert_contains "$out" "served: $board" "build did not establish the Lavish session: $out"
+  assert_contains "$out" "link: https://$FM_LAVISH_WORLD_HOST/session/deadbeef" \
+    "build did not print the board's public link: $out"
+  assert_not_contains "$out" "http://" "build printed lavish-axi's own http link: $out"
   assert_contains "$out" "bound: " "build did not report the answer binding: $out"
   assert_contains "$out" "armed: " "the first build did not arm the board source: $out"
   assert_present "$board" "build reported success without a board"
@@ -400,7 +414,7 @@ fi
 if [ "${1:-}" != poll ]; then
   real=$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")
   printf '%s\n' "$real" > "$FM_HOME/order-open"
-  printf 'session:\n  status: opened\n'
+  printf 'session:\n  url: "http://127.0.0.1:4387/session/order"\n  status: opened\n'
   exit 0
 fi
 cat <<EOF
@@ -464,6 +478,22 @@ run_lavish_source_id() {  # <home> <artifact>
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
     "$ROOT/bin/fm-procevent-lavish.sh" source-id "$2"
+}
+
+test_build_refuses_without_a_public_tunnel() {
+  local home data out rc=0
+  home=$(make_home no-tunnel)
+  data="$home/payload.json"
+  write_valid_payload "$data"
+  rm -f "$home/config/lavish-tunnel"
+
+  out=$(run_board "$home" build "$data" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "the board built with no public tunnel configured: $out"
+  assert_contains "$out" "config/lavish-tunnel is absent" "the missing tunnel was not named: $out"
+  assert_not_contains "$out" "link:" "a board with no public tunnel still printed a link: $out"
+  [ ! -s "$home/lavish-state/open" ] || fail "a board with no public tunnel still opened a Lavish session"
+  assert_not_contains "$out" "armed: " "a board with no public tunnel still armed its source: $out"
+  pass "build refuses before opening the board when no public tunnel is configured"
 }
 
 test_rebuild_is_idempotent_and_does_not_double_arm() {
@@ -783,6 +813,7 @@ test_charted_kind_is_optional_and_accepts_both_values
 test_build_injects_binds_then_arms
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
+test_build_refuses_without_a_public_tunnel
 test_rebuild_is_idempotent_and_does_not_double_arm
 test_build_refuses_a_template_without_exactly_one_slot
 test_build_reopens_a_session_the_captain_ended

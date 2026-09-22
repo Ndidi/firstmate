@@ -27,9 +27,10 @@ Firstmate registers a source, keeps working, and is woken when that process comp
 ## Arming a source
 
 Use the adapter, not the generic runner, for a real source.
-For a Lavish review artifact firstmate owns:
+For a Lavish review artifact firstmate owns, open it on the captain's phone first and send him only the `link:` line that prints:
 
 ```sh
+bin/fm-lavish.sh open <artifact.html>
 bin/fm-procevent-lavish.sh arm <artifact.html>
 ```
 

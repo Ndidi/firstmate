@@ -37,6 +37,22 @@ Note that `lavish-axi <anything> --help` exits 0 for any argument, including a n
 
 The adapter depends on none of this: it uses only the published poll shape above.
 
+## The interruption a server restart produces
+
+Measured on 2026-09-22 on Linux 6.8 with `lavish-axi` 0.1.47, against a server on an isolated `LAVISH_AXI_PORT` and `LAVISH_AXI_STATE_DIR`, by stopping it under a running poll:
+
+```sh
+$ lavish-axi poll page/t.html   # while another shell runs `lavish-axi stop`
+error: Lavish Editor poll response was interrupted
+code: SERVER_ERROR
+help[2]: Run `lavish-axi server --verbose` or inspect `~/.lavish-axi/server.log` (`LAVISH_AXI_STATE_DIR/server.log` when set) for server startup or crash diagnostics,Re-run the last `lavish-axi poll <html-file>` command after the server is healthy
+# exit 1; the progress banner goes to stderr, these three lines to stdout
+```
+
+The adapter's quiet retry therefore accepts the two exact lines optionally followed by one `help[<n>]:` line, which is how an armed page reattaches after `bin/fm-lavish.sh` restarts the server with the public host.
+The same session stays listed `open` across the restart, because sessions live in the state directory rather than the server process.
+`tests/fm-lavish-live-e2e.test.sh` refreshes the related server facts: a plainly started server answers the tunnel's `Host` with 403, keeps that binding when a later call carries `LAVISH_AXI_LINK_HOST` and `LAVISH_AXI_ALLOWED_HOSTS`, and accepts the host once `bin/fm-lavish.sh open` has restarted it.
+
 ## Why an ended Lavish review is terminal
 
 Re-verified on 2026-08-01 against the same installed build.
@@ -103,6 +119,7 @@ Exercised by `tests/fm-procevent.test.sh` against a fake blocking source whose c
 | adapter-owned silence verdict | an ordinary firstmate-owned Lavish source driven against a stand-in poll that returns an empty ended session captures its result, records it durably handled, appends no wake, and stays silent through a later `reconcile` that would otherwise republish it, while still retiring its ended source; the same real path with a `Send & End` response carrying the captain's choice still publishes its `check` wake and is left unacknowledged for the handler |
 | worker-owned Lavish rounds | one three-round fixture arms a board for an identity-matched task endpoint, delivers nonterminal and terminal captures directly to that task's steering inbox without a firstmate `check` wake, acknowledges each nonterminal round through a successful re-arm, redelivers an inbox note filed before acknowledgement, refuses a second armer and every early retirement, and concludes the terminal round through `handled` without another poll; focused fixtures also pin failed re-arm rollback, generation-specific reply staging, one reply post across transient poll retries, unreachable-owner refusal, interrupted conclusion recovery, and repeat acknowledgement isolation |
 | Lavish handled-status classification | an executable fixture table pins exact `feedback`, `ended`, `waiting`, and `browser_disconnected` mappings, including `browser_disconnected` to `disconnected`; the same suite proves that status is nonterminal and receives a zero-answer silence verdict |
+| Lavish public route | an armed page's poll with `config/lavish-tunnel` set starts the Lavish server for the tunnel's public host and polls with that environment, and refuses without calling `lavish-axi` when the configured tunnel cannot start; the 0.1.47 interruption with its help line retries quietly while a response continuing past that line is captured whole; `tests/fm-lavish.test.sh` owns the open path |
 | configured Lavish host convergence | the adapter reads `config/lavish-axi-host` before a poll, restores its original set or unset ambient value when the file disappears before a retry, and refuses an uninspectable path before calling `lavish-axi`; spawn coverage proves a configured address enters the worker launch while an absent file leaves the destination environment unchanged |
 | silence fails closed | the adapter's published `silent` command suppresses only an `ended` session with no queued content block or a `browser_disconnected` response, and announces a real answer, freeform prose, any recognized content block regardless of its declared count, a malformed top-level content header, a `waiting` or `missing` session, a server error, an unreadable result, and indented payload text imitating an empty content block; the `remote-reply` and `when` adapters, which implement no `silent` command, announce every result |
 | terminal retirement preserves the result | the retired source's captured output, its announced event, its handled acknowledgement, and later explicit `retire` all still behave normally |

@@ -18,12 +18,19 @@
 #            session on that board and PROVE it is live BEFORE binding and
 #            arming its answer source, so a registered poll can never race a
 #            session that does not exist or attach to one that has ended.
+#            The session is opened through bin/fm-lavish-lib.sh's public
+#            environment, so the board opens on the captain's phone; without
+#            config/lavish-tunnel, or when the tunnel cannot be made ready, the
+#            build refuses before any session exists.
 #            Bind to the keyed-answer intake (bin/fm-captain-hold.sh) ALWAYS
 #            precedes arm, so the board can never produce an answer that has
 #            nowhere to go (captain-hold-lifecycle's ordering rule, enforced
 #            here rather than left to agent memory). Output starts with
-#            `board: <path>`, then includes lavish-axi's session output and
-#            the remaining status:
+#            `board: <path>`, then includes lavish-axi's session output,
+#            minus the http url line it builds for itself, and the remaining
+#            status:
+#              link: https://<host>/session/<id>   the link to send; never the
+#                                                  url lavish-axi printed
 #              session: live | reopened
 #              served: <path>
 #              bound: <source-id>
@@ -91,6 +98,9 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
+
+# shellcheck source=bin/fm-lavish-lib.sh
+. "$SCRIPT_DIR/fm-lavish-lib.sh"
 
 TEMPLATE="${FM_BEARINGS_BOARD_TEMPLATE:-$SCRIPT_DIR/../.agents/skills/bearings/assets/board-template.html}"
 PLACEHOLDER='__FM_BEARINGS_BOARD_DATA__'
@@ -240,6 +250,25 @@ lavish_board_live() {  # <establish output> <canonical-board-path>
   lavish_session_listed_open "$2"
 }
 
+print_board_link() {  # <lavish-axi output>
+  local link
+  link=$(fm_lavish_public_link "$1") || fail "lavish-axi printed no session link for the board"
+  printf 'link: %s\n' "$link"
+}
+
+# The board is captain-facing, so its session is only ever opened reachable
+# from his phone: the public environment must be ready first, or nothing opens.
+require_public_board_env() {
+  local rc=0
+  fm_lavish_public_env --edge || rc=$?
+  case "$rc" in
+    0) ;;
+    3) fail "no public tunnel is configured for Lavish (config/lavish-tunnel is absent), so the board could only open on this computer; see docs/configuration.md \"Lavish public links\"" ;;
+    *) fail "the board was not opened, because it could not be made reachable from the captain's phone" ;;
+  esac
+  export LAVISH_AXI_NO_OPEN=1
+}
+
 # Establish the board session and PROVE it is live before anything arms a poll
 # on it. A session the captain ended is reopened once - the captain asked for
 # this board, which is exactly the attention `--reopen` exists for - and a
@@ -250,15 +279,17 @@ establish_board_session() {  # <board>
   BOARD_SESSION_REOPENED=0
   real=$(board_realpath "$board") || fail "cannot resolve the board path: $board"
   out=$(lavish-axi "$board") || fail "cannot establish the board Lavish session"
-  printf '%s\n' "$out"
+  printf '%s\n' "$out" | sed '/^[[:space:]]*url:/d'
   if lavish_board_live "$out" "$real"; then
+    print_board_link "$out"
     printf 'session: live\n'
     return 0
   fi
   out=$(lavish-axi "$board" --reopen) || fail "cannot reopen the ended board Lavish session"
-  printf '%s\n' "$out"
+  printf '%s\n' "$out" | sed '/^[[:space:]]*url:/d'
   if lavish_board_live "$out" "$real"; then
     BOARD_SESSION_REOPENED=1
+    print_board_link "$out"
     printf 'session: reopened\n'
     return 0
   fi
@@ -409,6 +440,7 @@ command_build() {
   sid=$("$SCRIPT_DIR/fm-procevent-lavish.sh" source-id "$board") \
     || fail "cannot derive the board source id"
   pre_reopen_owner=$(source_owner "$sid")
+  require_public_board_env
   establish_board_session "$board"
   if [ "$BOARD_SESSION_REOPENED" = 1 ]; then
     "$SCRIPT_DIR/fm-procevent-lavish.sh" retire "$board" >/dev/null \
