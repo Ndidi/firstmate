@@ -81,10 +81,11 @@
 # means the session remains open and is handled as a silent reconnect wait.
 # The poll reads config/lavish-axi-host from FM_HOME before every lavish-axi
 # invocation so firstmate and workers reach the same server, then applies
-# bin/fm-lavish-lib.sh's public environment when config/lavish-tunnel is set, so
-# a poll that has to start the Lavish server starts it reachable from the
-# captain's phone; a configured tunnel that cannot be brought up fails the poll
-# rather than starting a server the phone cannot reach.
+# bin/fm-lavish-lib.sh's public environment when config/lavish-tailscale or
+# config/lavish-tunnel is set, so a poll that has to start the Lavish server
+# starts it reachable from the captain's phone; a configured route that cannot
+# be brought up fails the poll rather than starting a server the phone cannot
+# reach.
 #
 # `answers` is this adapter's half of the generic keyed-answer contract in
 # bin/fm-procevent.sh. It reports what the captain actually chose, as

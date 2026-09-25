@@ -489,7 +489,7 @@ test_build_refuses_without_a_public_tunnel() {
 
   out=$(run_board "$home" build "$data" 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "the board built with no public tunnel configured: $out"
-  assert_contains "$out" "config/lavish-tunnel is absent" "the missing tunnel was not named: $out"
+  assert_contains "$out" "config/lavish-tunnel are both absent" "the missing route was not named: $out"
   assert_not_contains "$out" "link:" "a board with no public tunnel still printed a link: $out"
   [ ! -s "$home/lavish-state/open" ] || fail "a board with no public tunnel still opened a Lavish session"
   assert_not_contains "$out" "armed: " "a board with no public tunnel still armed its source: $out"

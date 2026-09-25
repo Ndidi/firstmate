@@ -5,29 +5,34 @@
 #   fm-lavish.sh open <artifact.html> [--reopen]
 #   fm-lavish.sh poll <artifact.html> [--agent-reply <text>]
 #
-# open   Make sure the ngrok tunnel config/lavish-tunnel names is up (starting
-#        it once, never twice), read its public hostname from ngrok's local
-#        API, make sure the Lavish server accepts that hostname (restarting it
-#        with the right environment when it does not), prove the public URL
-#        asks for a password, then open or resume the page's session without
-#        popping a local browser tab. Output:
-#          link: https://<host>/session/<id>     the ONLY link to send
+# open   Make sure the page's route to the captain's phone is up, then open or
+#        resume the page's session without popping a local browser tab. With
+#        config/lavish-tailscale that route is this machine's tailnet address:
+#        read it from Tailscale and make sure the Lavish server answers there
+#        and accepts it (restarting the server with the right environment when
+#        it does not). Otherwise it is the ngrok tunnel config/lavish-tunnel
+#        names: start it once, never twice, read its public hostname from
+#        ngrok's local API, make sure the Lavish server accepts that hostname,
+#        and prove the public URL asks for a password. Output:
+#          link: <origin>/session/<id>           the ONLY link to send
+#                (http://<tailnet-ipv4>:<port> over Tailscale,
+#                 https://<host> through the tunnel)
 #          status: <lavish-axi session status>
 #          artifact: <absolute path>
 #          server-restarted: running Lavish polls were interrupted ...
 #                                               (only when it had to restart)
 #        Running it on a page that is already open just resumes the session
 #        and prints its link, so it is also how to get the phone link for a
-#        page a worker or another tool opened. Without config/lavish-tunnel it
-#        refuses: this command never prints a loopback or LAN link. A session
+#        page a worker or another tool opened. With neither file it refuses:
+#        this command never prints a loopback or LAN link. A session
 #        the captain ended from the page refuses unless --reopen is given,
 #        which is only for when he asked for more review or something
 #        important needs his eyes.
 # poll   Wait for the captain's answers with the same environment, so a poll
-#        that has to start the Lavish server starts it reachable through the
-#        tunnel. It runs the published blocking `lavish-axi poll` in the
-#        foreground and prints its response verbatim. Without
-#        config/lavish-tunnel it polls locally. Pages Firstmate owns are
+#        that has to start the Lavish server starts it reachable from the
+#        phone. It runs the published blocking `lavish-axi poll` in the
+#        foreground and prints its response verbatim. With neither file it
+#        polls locally. Pages Firstmate owns are
 #        normally armed with bin/fm-procevent-lavish.sh instead, whose poll
 #        applies the same environment.
 #
@@ -81,7 +86,7 @@ cmd_open() {
   rc=$?
   case "$rc" in
     0) ;;
-    3) die "no public tunnel is configured for Lavish (config/lavish-tunnel is absent), so this page could only open on this computer; see docs/configuration.md \"Lavish public links\"" ;;
+    3) die "no route to the captain's phone is configured for Lavish (config/lavish-tailscale and config/lavish-tunnel are both absent), so this page could only open on this computer; see docs/configuration.md \"Lavish public links\"" ;;
     *) die "the page was not opened, because it could not be made reachable from the captain's phone" ;;
   esac
   if [ "$reopen" -eq 1 ]; then
@@ -100,7 +105,7 @@ cmd_open() {
   printf 'status: %s\n' "${status:-unknown}"
   printf 'artifact: %s\n' "$real"
   if [ "${FM_LAVISH_RESTARTED:-0}" = 1 ]; then
-    printf 'server-restarted: the Lavish server was running without the public host and was restarted; armed Lavish sources reattach on their own, and any foreground lavish-axi poll that was running must be re-run\n'
+    printf 'server-restarted: the Lavish server was running without the phone link host and was restarted; armed Lavish sources reattach on their own, and any foreground lavish-axi poll that was running must be re-run\n'
   fi
 }
 

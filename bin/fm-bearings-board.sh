@@ -20,8 +20,8 @@
 #            session that does not exist or attach to one that has ended.
 #            The session is opened through bin/fm-lavish-lib.sh's public
 #            environment, so the board opens on the captain's phone; without
-#            config/lavish-tunnel, or when the tunnel cannot be made ready, the
-#            build refuses before any session exists.
+#            config/lavish-tailscale or config/lavish-tunnel, or when that route
+#            cannot be made ready, the build refuses before any session exists.
 #            Bind to the keyed-answer intake (bin/fm-captain-hold.sh) ALWAYS
 #            precedes arm, so the board can never produce an answer that has
 #            nowhere to go (captain-hold-lifecycle's ordering rule, enforced
@@ -263,7 +263,7 @@ require_public_board_env() {
   fm_lavish_public_env --edge || rc=$?
   case "$rc" in
     0) ;;
-    3) fail "no public tunnel is configured for Lavish (config/lavish-tunnel is absent), so the board could only open on this computer; see docs/configuration.md \"Lavish public links\"" ;;
+    3) fail "no route to the captain's phone is configured for Lavish (config/lavish-tailscale and config/lavish-tunnel are both absent), so the board could only open on this computer; see docs/configuration.md \"Lavish public links\"" ;;
     *) fail "the board was not opened, because it could not be made reachable from the captain's phone" ;;
   esac
   export LAVISH_AXI_NO_OPEN=1

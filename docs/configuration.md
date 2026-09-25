@@ -386,18 +386,22 @@ When the file is absent, worker launches do not add a board address and retain t
 Malformed or unreadable values refuse the launch before the worker starts, while the adapter refuses the same malformed value before polling.
 The address selects the shared server; only the public-link path below starts or restarts it, a tunnel that forwards to localhost cannot reach a server bound only to another address, and the Lavish startup crash remains a vendor-tool concern.
 
-## Lavish public links (config/lavish-tunnel)
+## Lavish public links (config/lavish-tailscale, config/lavish-tunnel)
 
-The optional local, gitignored `config/lavish-tunnel` holds one ngrok tunnel name, defined in this machine's own ngrok configuration, that forwards to the Lavish server; its presence routes every captain-facing Lavish page through that tunnel.
-`bin/fm-lavish.sh open <artifact.html>` is the one way to put a page in front of the captain, and its `link: https://<host>/session/<id>` line is the only link to send.
-Before opening, it starts the tunnel unless ngrok already runs it, reads the public hostname from ngrok's local API rather than assuming a domain, restarts the Lavish server when it was started without that hostname allowed, and checks that the public URL asks for a password.
+Two optional local, gitignored files choose how every captain-facing Lavish page reaches the captain's phone.
+An empty `config/lavish-tailscale` selects this machine's tailnet and wins whenever it is present; otherwise `config/lavish-tunnel` holds one ngrok tunnel name, defined in this machine's own ngrok configuration, that forwards to the Lavish server.
+`bin/fm-lavish.sh open <artifact.html>` is the one way to put a page in front of the captain, and its `link:` line is the only link to send: `http://<tailnet-ipv4>:4387/session/<id>` over Tailscale, `https://<host>/session/<id>` through the tunnel.
+Over Tailscale, it reads this machine's tailnet address and MagicDNS name from `tailscale status --json`, allows both on the Lavish server, and keeps the server on its default loopback address while a small relay listening only on the tailnet address forwards to it, so the page is reachable from the captain's tailnet devices and nowhere else on the network.
+The tailnet route asks for no password, because Tailscale has already authenticated every device that can reach it.
+Through the tunnel, it starts the tunnel unless ngrok already runs it, reads the public hostname from ngrok's local API rather than assuming a domain, and checks that the public URL asks for a password.
+On either route it restarts the Lavish server when the server was started without the link host allowed, and leaves a server that already accepts it running.
 Running it on a page that is already open resumes the session and prints the same link, so it also turns a page a worker or another tool opened into a link for the captain's phone.
 `bin/fm-lavish.sh poll`, the armed-source poll in `bin/fm-procevent-lavish.sh`, and `bin/fm-bearings-board.sh` apply the same environment, so whichever of them has to start the server starts it reachable from the phone.
-Without the file, `open` and the bearings board refuse rather than print a link that only works on this computer, and polls run locally.
-A present file that cannot be read or holds no valid name, a tunnel that cannot start, forwards to another port, or answers without a password, and a server that keeps coming back without the hostname all refuse instead of falling back.
+Without either file, `open` and the bearings board refuse rather than print a link that only works on this computer, and polls run locally.
+A present file that cannot be read or holds the wrong content, Tailscale that is not running or reports no IPv4 address, a tunnel that cannot start, forwards to another port, or answers without a password, and a server that keeps coming back without the link host all refuse instead of falling back.
 The tunnel must use basic auth, never Google OAuth: Lavish's sandboxed frame loads `/sdk.js` without the OAuth cookie, so every queue button on the page stops working.
 Restarting the server interrupts every Lavish poll running on the machine; armed sources reattach through their own retry, and `open` reports the restart so a foreground poll can be re-run.
-The file is inherited into secondmate homes through the primary-authoritative configuration contract, and [`bin/fm-lavish-lib.sh`](../bin/fm-lavish-lib.sh)'s header owns the exact sequence.
+`config/lavish-tunnel` is inherited into secondmate homes through the primary-authoritative configuration contract, while `config/lavish-tailscale` is not, and [`bin/fm-lavish-lib.sh`](../bin/fm-lavish-lib.sh)'s header owns the exact sequence, including why the server stays on loopback behind the relay.
 A matching ngrok definition, whose name goes in the file:
 
 ```yaml

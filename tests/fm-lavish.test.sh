@@ -114,7 +114,7 @@ rm -f "$HOME_DIR/config/lavish-tunnel"
 run_lavish open "$PAGE"
 [ "$RC" -ne 0 ] || fail "open succeeded with no tunnel configured"
 assert_not_contains "$OUT" "link:" "open printed a link with no tunnel configured"
-assert_contains "$ERR" "config/lavish-tunnel is absent" "the missing configuration was not named"
+assert_contains "$ERR" "config/lavish-tunnel are both absent" "the missing configuration was not named"
 [ -z "$(calls)" ] || fail "an unconfigured open still ran ngrok or lavish-axi: $(calls)"
 pass "with no tunnel configured, open refuses rather than printing a local link"
 

@@ -406,7 +406,7 @@ family_for_basename() {
     fm-no-mistakes-required.test.sh|fm-peek-remote.test.sh|\
     fm-pending-reply.test.sh|fm-pi-branch-extension.test.sh|\
     fm-procevent-quota.test.sh|fm-procevent-when.test.sh|fm-procevent.test.sh|\
-    fm-lavish.test.sh|fm-live-gate.test.sh|\
+    fm-lavish.test.sh|fm-lavish-tailscale.test.sh|fm-live-gate.test.sh|\
     fm-project-origin.test.sh|fm-public-followup.test.sh|fm-quota-choose.test.sh|\
     fm-remote-entrypoint.test.sh|fm-remote-secondmate-parent-binding.test.sh|\
     fm-send-remote-delivery.test.sh|fm-spawn-pool-base-freshen.test.sh|\
@@ -739,6 +739,7 @@ tests/fm-home-summary-refresh.test.sh 37264
 tests/fm-inactive-reconcile.test.sh 53178
 tests/fm-kimi-harness.test.sh 19151
 tests/fm-lavish-live-e2e.test.sh 48
+tests/fm-lavish-tailscale.test.sh 2720
 tests/fm-lavish.test.sh 15421
 tests/fm-lint-workflows.test.sh 785
 tests/fm-live-gate.test.sh 1755
